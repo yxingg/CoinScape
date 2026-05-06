@@ -7,6 +7,7 @@ import 'dart:io';
 
 import '../database/database.dart';
 import '../models/sync_models.dart';
+import '../utils/logger.dart';
 
 Future<Uint8List> generateBackupDataBytes(
   List<SeriesData> series,
@@ -15,6 +16,8 @@ Future<Uint8List> generateBackupDataBytes(
   List<CoinImage> coinImages,
   List<SeriesImage> seriesImages,
 ) async {
+  AppLogger.info(logPrefixSync, '开始生成备份数据: series=${series.length}, coins=${coins.length}, links=${links.length}, coinImages=${coinImages.length}, seriesImages=${seriesImages.length}');
+
   // 1. Prepare JSON payload
   final data = SyncData(
     series: series.map((s) => s.toJson()).toList(),
@@ -54,7 +57,9 @@ Future<Uint8List> generateBackupDataBytes(
   // 3. Zip Encoder
   final encoder = ZipEncoder();
   final zipList = encoder.encode(archive);
-  return Uint8List.fromList(zipList);
+  final result = Uint8List.fromList(zipList);
+  AppLogger.info(logPrefixSync, '备份包生成完成, 大小: ${result.length} bytes');
+  return result;
 }
 
 class SyncService {
@@ -75,10 +80,11 @@ class SyncService {
       password: password,
       debug: kDebugMode,
     );
-    // Ignore self-signed certs for webdav connection if needed
-    c.setConnectTimeout(8000);
-    c.setSendTimeout(8000);
-    c.setReceiveTimeout(8000);
+    // 增加超时时间以处理大文件和网络延迟
+    // 特别是对于包含图片的备份文件
+    c.setConnectTimeout(15000);  // 连接超时: 15秒
+    c.setSendTimeout(30000);     // 上传超时: 30秒
+    c.setReceiveTimeout(30000);  // 下载超时: 30秒
     return c;
   }
 
@@ -91,19 +97,46 @@ class SyncService {
   ) async {
     final c = client;
     final zipData = await generateBackupDataBytes(series, coins, links, coinImages, seriesImages);
-    await c.write('/latest_backup.ccm', zipData);
+    const remotePath = '/latest_backup.ccm';
+    AppLogger.info(logPrefixSync, '开始上传 WebDAV 备份到 $remotePath, 大小: ${zipData.length} bytes');
+    try {
+      AppLogger.debug(logPrefixSync, '执行 WebDAV write: $remotePath');
+      await c.write(remotePath, zipData);
+
+      AppLogger.debug(logPrefixSync, '写入完成，开始校验远端文件是否存在');
+      final remoteFile = await c.readProps(remotePath);
+      AppLogger.info(logPrefixSync, '远端文件校验成功: ${remoteFile.path}');
+    } catch (e, st) {
+      AppLogger.error(logPrefixSync, 'WebDAV 上传失败: $e', st);
+      rethrow;
+    }
   }
 
   Future<SyncData> pullBackup() async {
     final c = client;
+    const remotePath = '/latest_backup.ccm';
+    AppLogger.info(logPrefixSync, '开始从 WebDAV 下载备份: $remotePath');
     
-    // Download into memory byte array
-    final bytes = await c.read('/latest_backup.ccm');
+    List<int>? bytes;
+    try {
+      // Download into memory byte array
+      bytes = await c.read(remotePath);
+      AppLogger.info(logPrefixSync, '备份下载完成, 字节数: ${bytes.length}');
+    } catch (e, st) {
+      AppLogger.error(logPrefixSync, 'WebDAV 下载失败: $e', st);
+      rethrow;
+    }
+    
+    if (bytes.isEmpty) {
+      throw Exception('下载的备份文件为空');
+    }
     
     // Decode zip
-    final archive = ZipDecoder().decodeBytes(bytes);
+    final archive = ZipDecoder().decodeBytes(Uint8List.fromList(bytes));
+    AppLogger.debug(logPrefixSync, '备份压缩包解压完成, 条目数: ${archive.length}');
     
     SyncData? syncData;
+    var restoredImageCount = 0;
     
     for (final archiveFile in archive) {
       if (archiveFile.name == 'db.json') {
@@ -117,10 +150,12 @@ class SyncService {
            await imgFile.create(recursive: true);
          }
          await imgFile.writeAsBytes(archiveFile.content as List<int>);
+         restoredImageCount++;
       }
     }
     
     if (syncData == null) throw Exception("Invalid backup file: db.json is missing.");
+    AppLogger.info(logPrefixSync, '下载数据合并准备完成, 恢复图片数量: $restoredImageCount');
     
     return syncData;
   }

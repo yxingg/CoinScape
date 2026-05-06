@@ -825,7 +825,8 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
   /// 显示"添加到系列"对话框
   Future<void> _showAddToSeriesDialog(BuildContext context, WidgetRef ref) async {
     if (_selectedCoinIds.isEmpty) return;
-    final series = await ref.read(coinRepositoryProvider).db.select(ref.read(coinRepositoryProvider).db.series).get();
+    final repo = ref.read(coinRepositoryProvider);
+    final series = await repo.getAllSeries();
     if (!context.mounted) return;
 
     final selectedSeriesIds = <String>{};
@@ -865,7 +866,7 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
     );
 
     if (result == true && selectedSeriesIds.isNotEmpty) {
-      await ref.read(coinRepositoryProvider).addCoinsToSeries(
+      await repo.addCoinsToSeries(
         _selectedCoinIds.toList(),
         selectedSeriesIds.toList(),
       );
@@ -917,42 +918,42 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
   Future<void> _generatePdf(BuildContext context, WidgetRef ref) async {
     if (_selectedCoinIds.isEmpty) return;
 
-    final db = ref.read(coinRepositoryProvider).db;
-    final coins = await db.select(db.coins).get();
-    final selectedCoins = coins.where((c) => _selectedCoinIds.contains(c.id)).toList();
+    final repo = ref.read(coinRepositoryProvider);
+    final allCoins = await repo.getAllCoins();
+    final selectedCoins = allCoins.where((c) => _selectedCoinIds.contains(c.id)).toList();
 
     final settings = ref.read(settingsProvider);
-      final seriesSections = <PdfSeriesSection>[];
+    final seriesSections = <PdfSeriesSection>[];
 
-      final links = await db.select(db.coinSeriesLink).get();
-      final series = await db.select(db.series).get();
-      final seriesMap = {for (final s in series) s.id: s.name};
+    final allSeries = await repo.getAllSeries();
+    final seriesMap = {for (final s in allSeries) s.id: s.name};
 
-      final selectedSeries = ref.read(selectedSeriesProvider);
-      if (selectedSeries != null) {
-        seriesSections.add(PdfSeriesSection(title: selectedSeries.name, coins: selectedCoins));
-      } else {
-        final grouped = <String, List<Coin>>{};
-        final coinById = {for (final c in selectedCoins) c.id: c};
+    final selectedSeries = ref.read(selectedSeriesProvider);
+    if (selectedSeries != null) {
+      seriesSections.add(PdfSeriesSection(title: selectedSeries.name, coins: selectedCoins));
+    } else {
+      final grouped = <String, List<Coin>>{};
 
-        for (final link in links) {
-          final coin = coinById[link.coinId];
-          if (coin == null) continue;
-          final title = seriesMap[link.seriesId] ?? '未分组';
+      // Get links for all selected coins
+      for (final coin in selectedCoins) {
+        final ids = await repo.getSeriesIdsForCoin(coin.id);
+        for (final sid in ids) {
+          final title = seriesMap[sid] ?? '未分组';
           grouped.putIfAbsent(title, () => []).add(coin);
         }
-
-        final taggedCoinIds = links.map((e) => e.coinId).toSet();
-        final untagged = selectedCoins.where((c) => !taggedCoinIds.contains(c.id)).toList();
-        if (untagged.isNotEmpty) {
-          grouped.putIfAbsent('未分组', () => []).addAll(untagged);
-        }
-
-        seriesSections.addAll(grouped.entries.map((e) => PdfSeriesSection(title: e.key, coins: e.value)));
-        if (seriesSections.isEmpty) {
-          seriesSections.add(PdfSeriesSection(title: '纪念币', coins: selectedCoins));
-        }
       }
+
+      final taggedCoinIds = grouped.values.expand((l) => l).map((c) => c.id).toSet();
+      final untagged = selectedCoins.where((c) => !taggedCoinIds.contains(c.id)).toList();
+      if (untagged.isNotEmpty) {
+        grouped.putIfAbsent('未分组', () => []).addAll(untagged);
+      }
+
+      seriesSections.addAll(grouped.entries.map((e) => PdfSeriesSection(title: e.key, coins: e.value)));
+      if (seriesSections.isEmpty) {
+        seriesSections.add(PdfSeriesSection(title: '纪念币', coins: selectedCoins));
+      }
+    }
 
     if (context.mounted) {
       Navigator.push(context, MaterialPageRoute(
@@ -963,7 +964,7 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
               selectedCoins,
               chineseFontId: settings.chineseFontId,
               englishFontId: settings.englishFontId,
-                seriesSections: seriesSections,
+              seriesSections: seriesSections,
             ),
             allowSharing: true,
             allowPrinting: true,
@@ -985,21 +986,33 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
     try {
       messenger.showSnackBar(const SnackBar(content: Text('正在打包...')));
       
-      final db = ref.read(coinRepositoryProvider).db;
-      final coins = await db.select(db.coins).get();
-      final selectedCoins = coins.where((c) => _selectedCoinIds.contains(c.id)).toList();
+      final repo = ref.read(coinRepositoryProvider);
+      final allCoins = await repo.getAllCoins();
+      final selectedCoins = allCoins.where((c) => _selectedCoinIds.contains(c.id)).toList();
       
-      final links = await db.select(db.coinSeriesLink).get();
-      final selectedLinks = links.where((l) => _selectedCoinIds.contains(l.coinId)).toList();
-
-      final allCoinImages = await db.select(db.coinImages).get();
-      final selectedCoinImages = allCoinImages.where((i) => _selectedCoinIds.contains(i.coinId)).toList();
+      // Build links and related data using repo methods
+      final selectedLinks = <CoinSeriesLinkData>[];
+      final selectedCoinImages = <CoinImage>[];
+      final selectedSeriesSet = <String>{};
       
-      final seriesIds = selectedLinks.map((l) => l.seriesId).toSet();
-      final series = await db.select(db.series).get();
-      final selectedSeries = series.where((s) => seriesIds.contains(s.id)).toList();
-      final allSeriesImages = await db.select(db.seriesImages).get();
-      final selectedSeriesImages = allSeriesImages.where((i) => seriesIds.contains(i.seriesId)).toList();
+      for (final coin in selectedCoins) {
+        final seriesIds = await repo.getSeriesIdsForCoin(coin.id);
+        for (final sid in seriesIds) {
+          selectedLinks.add(CoinSeriesLinkData(coinId: coin.id, seriesId: sid));
+          selectedSeriesSet.add(sid);
+        }
+        final images = await repo.getCoinImages(coin.id);
+        selectedCoinImages.addAll(images);
+      }
+      
+      final allSeries = await repo.getAllSeries();
+      final selectedSeries = allSeries.where((s) => selectedSeriesSet.contains(s.id)).toList();
+      
+      final selectedSeriesImages = <SeriesImage>[];
+      for (final s in selectedSeries) {
+        final images = await repo.getSeriesImages(s.id);
+        selectedSeriesImages.addAll(images);
+      }
       
       final zipBytes = await generateBackupDataBytes(
         selectedSeries,
@@ -1072,12 +1085,29 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
       final config = ref.read(webDavConfigProvider);
       final service = SyncService(url: config.url, user: config.user, password: config.password);
       final repo = ref.read(coinRepositoryProvider);
-      final series = await repo.db.select(repo.db.series).get();
-      final coins = await repo.db.select(repo.db.coins).get();
-      final links = await repo.db.select(repo.db.coinSeriesLink).get();
-      final coinImages = await repo.db.select(repo.db.coinImages).get();
-      final seriesImages = await repo.db.select(repo.db.seriesImages).get();
-      await service.pushBackup(series, coins, links, coinImages, seriesImages);
+      final series = await repo.getAllSeries();
+      final coins = await repo.getAllCoins();
+      
+      // Build links, coinImages, seriesImages using repo methods
+      final links = <CoinSeriesLinkData>[];
+      final coinImages = <CoinImage>[];
+      final seriesImageList = <SeriesImage>[];
+      
+      for (final coin in coins) {
+        final ids = await repo.getSeriesIdsForCoin(coin.id);
+        for (final sid in ids) {
+          links.add(CoinSeriesLinkData(coinId: coin.id, seriesId: sid));
+        }
+        final images = await repo.getCoinImages(coin.id);
+        coinImages.addAll(images);
+      }
+      
+      for (final s in series) {
+        final images = await repo.getSeriesImages(s.id);
+        seriesImageList.addAll(images);
+      }
+      
+      await service.pushBackup(series, coins, links, coinImages, seriesImageList);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('云端备份成功！')));
       }
@@ -1116,7 +1146,6 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
   /// 合并云端数据到本地
   Future<void> _mergeCloudData(SyncData data) async {
     final repo = ref.read(coinRepositoryProvider);
-    final db = repo.db;
 
     final incomingSeries = data.series.map((e) => SeriesData.fromJson(e)).toList();
     final incomingCoins = data.coins.map((e) => Coin.fromJson(e)).toList();
@@ -1124,9 +1153,9 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
     final incomingCoinImages = data.coinImages.map((e) => CoinImage.fromJson(e)).toList();
     final incomingSeriesImages = data.seriesImages.map((e) => SeriesImage.fromJson(e)).toList();
 
-    final existingSeries = await db.select(db.series).get();
+    final existingSeries = await repo.getAllSeries();
     final existingSeriesIds = existingSeries.map((e) => e.id).toSet();
-    final existingCoins = await db.select(db.coins).get();
+    final existingCoins = await repo.getAllCoins();
     final existingCoinsIds = existingCoins.map((e) => e.id).toSet();
 
     bool overwriteAllConflicts = false;
@@ -1142,9 +1171,19 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
         } else if (skipAllConflicts) {
           continue;
         }
-        await db.update(db.series).replace(s);
+        await repo.updateSeries(SeriesCompanion(
+          id: drift.Value(s.id),
+          name: drift.Value(s.name),
+          description: drift.Value(s.description),
+          createdAt: drift.Value(s.createdAt),
+        ));
       } else {
-        await db.into(db.series).insert(s);
+        await repo.insertSeries(SeriesCompanion(
+          id: drift.Value(s.id),
+          name: drift.Value(s.name),
+          description: drift.Value(s.description),
+          createdAt: drift.Value(s.createdAt),
+        ));
       }
     }
 
@@ -1161,20 +1200,56 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
         } else if (skipAllConflicts) {
           continue;
         }
-        await db.update(db.coins).replace(c);
+        await repo.updateCoin(CoinsCompanion(
+          id: drift.Value(c.id),
+          name: drift.Value(c.name),
+          year: drift.Value(c.year),
+          faceValue: drift.Value(c.faceValue),
+          material: drift.Value(c.material),
+          weight: drift.Value(c.weight),
+          diameter: drift.Value(c.diameter),
+          mintage: drift.Value(c.mintage),
+          mint: drift.Value(c.mint),
+          grade: drift.Value(c.grade),
+          unitPrice: drift.Value(c.unitPrice),
+          quantity: drift.Value(c.quantity),
+          quantityUnit: drift.Value(c.quantityUnit),
+          collectionTime: drift.Value(c.collectionTime),
+          createdAt: drift.Value(c.createdAt),
+          comments: drift.Value(c.comments),
+          firstImagePath: drift.Value(c.firstImagePath),
+        ));
       } else {
-        await db.into(db.coins).insert(c);
+        await repo.insertCoin(CoinsCompanion(
+          id: drift.Value(c.id),
+          name: drift.Value(c.name),
+          year: drift.Value(c.year),
+          faceValue: drift.Value(c.faceValue),
+          material: drift.Value(c.material),
+          weight: drift.Value(c.weight),
+          diameter: drift.Value(c.diameter),
+          mintage: drift.Value(c.mintage),
+          mint: drift.Value(c.mint),
+          grade: drift.Value(c.grade),
+          unitPrice: drift.Value(c.unitPrice),
+          quantity: drift.Value(c.quantity),
+          quantityUnit: drift.Value(c.quantityUnit),
+          collectionTime: drift.Value(c.collectionTime),
+          createdAt: drift.Value(c.createdAt),
+          comments: drift.Value(c.comments),
+          firstImagePath: drift.Value(c.firstImagePath),
+        ));
       }
     }
 
     for (final l in incomingLinks) {
-      await db.into(db.coinSeriesLink).insert(l, mode: drift.InsertMode.insertOrIgnore);
+      await repo.linkCoinToSeries(l.coinId, l.seriesId);
     }
     for (final img in incomingCoinImages) {
-      await db.into(db.coinImages).insert(img, mode: drift.InsertMode.insertOrReplace);
+      await repo.replaceCoinImages(img.coinId, [img.imagePath]);
     }
     for (final img in incomingSeriesImages) {
-      await db.into(db.seriesImages).insert(img, mode: drift.InsertMode.insertOrReplace);
+      await repo.replaceSeriesImages(img.seriesId, [img.imagePath]);
     }
   }
 

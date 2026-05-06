@@ -3,9 +3,11 @@ import 'package:path_provider/path_provider.dart';
 import 'package:http/http.dart' as http;
 import 'package:file_picker/file_picker.dart';
 import 'dart:io' as io;
+import 'api_service.dart';
+import '../utils/logger.dart';
 
 class FontManager {
-  // Web端暂存字体字节用的内存映射 (fontId -> bytes)
+  // Web端暂存字体字节用的内存映射 (fontId -> bytes) - 仅作为后备缓存
   static final Map<String, Uint8List> _webMemoryCache = {};
 
   static const Map<String, String> presetFontsUrls = {
@@ -14,7 +16,7 @@ class FontManager {
     'preset_roboto_regular': 'https://fonts.gstatic.com/s/roboto/v30/KFOmCnqEu92Fr1Me5WZLCzYlKw.ttf',
   };
 
-  /// 从特定 URL 下载预设字体并永久保存（移动/PC端保存到本地目录，Web端保存到内存）
+  /// 从特定 URL 下载预设字体并永久保存
   static Future<bool> downloadAndSavePresetFont(String fontId) async {
     final url = presetFontsUrls[fontId];
     if (url == null) return false;
@@ -26,7 +28,7 @@ class FontManager {
         return true;
       }
     } catch (e) {
-      debugPrint("Download font failed: $e");
+      AppLogger.error(logPrefixFont, "Download font failed: $e");
     }
     return false;
   }
@@ -61,10 +63,19 @@ class FontManager {
     return null;
   }
 
-  /// 储存字体字节到底层（Native->硬盘, Web->内存字典）
+  /// 储存字体字节到底层
   static Future<void> saveFont(String fontId, Uint8List bytes) async {
     if (kIsWeb) {
-      _webMemoryCache[fontId] = bytes;
+      // Web 端：上传到后端服务器
+      try {
+        final serverFontId = await ApiService.uploadFont(bytes, '$fontId.ttf');
+        _webMemoryCache[fontId] = bytes;
+        AppLogger.info(logPrefixFont, "Font saved to server: $serverFontId");
+      } catch (e) {
+        // 后端不可用时，回退到内存缓存
+        _webMemoryCache[fontId] = bytes;
+        AppLogger.warning(logPrefixFont, "Font saved to memory cache (backend unavailable): $e");
+      }
       return;
     } else {
       final dir = await getApplicationDocumentsDirectory();
@@ -79,7 +90,21 @@ class FontManager {
   /// 加载字体字节
   static Future<Uint8List?> loadFont(String fontId) async {
     if (kIsWeb) {
-      return _webMemoryCache[fontId];
+      // 先检查内存缓存
+      if (_webMemoryCache.containsKey(fontId)) {
+        return _webMemoryCache[fontId];
+      }
+      // 尝试从后端加载
+      try {
+        final response = await http.get(Uri.parse(ApiService.getFontUrl(fontId)));
+        if (response.statusCode == 200) {
+          _webMemoryCache[fontId] = response.bodyBytes;
+          return response.bodyBytes;
+        }
+      } catch (e) {
+        AppLogger.error(logPrefixFont, "Load font from server failed: $e");
+      }
+      return null;
     } else {
       final dir = await getApplicationDocumentsDirectory();
       final file = io.File('${dir.path}/fonts/$fontId.ttf');
@@ -93,7 +118,16 @@ class FontManager {
   /// 检查字体是否存在
   static Future<bool> hasFont(String fontId) async {
     if (kIsWeb) {
-      return _webMemoryCache.containsKey(fontId);
+      // 先检查内存缓存
+      if (_webMemoryCache.containsKey(fontId)) {
+        return true;
+      }
+      // 再检查后端
+      try {
+        return await ApiService.checkFontExists(fontId);
+      } catch (_) {
+        return false;
+      }
     } else {
       final dir = await getApplicationDocumentsDirectory();
       final file = io.File('${dir.path}/fonts/$fontId.ttf');
@@ -105,6 +139,9 @@ class FontManager {
   static Future<void> deleteFont(String fontId) async {
     if (kIsWeb) {
       _webMemoryCache.remove(fontId);
+      try {
+        await ApiService.deleteFont(fontId);
+      } catch (_) {}
       return;
     }
     final dir = await getApplicationDocumentsDirectory();

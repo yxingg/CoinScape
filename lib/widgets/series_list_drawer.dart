@@ -124,17 +124,15 @@ class _SeriesListDrawerState extends ConsumerState<SeriesListDrawer> {
   Future<void> _generatePdfForSelectedSeries() async {
     if (_selectedSeriesIds.isEmpty) return;
     final repo = ref.read(coinRepositoryProvider);
-    final db = repo.db;
-    final allCoins = await db.select(db.coins).get();
-    final links = await db.select(db.coinSeriesLink).get();
-    final series = await db.select(db.series).get();
-    final selectedSeries = series.where((s) => _selectedSeriesIds.contains(s.id)).toList();
+    final allSeries = await repo.getAllSeries();
+    final selectedSeries = allSeries.where((s) => _selectedSeriesIds.contains(s.id)).toList();
 
     final seriesSections = <PdfSeriesSection>[];
+    final allPdfCoins = <Coin>[];
     for (final s in selectedSeries) {
-      final coinIds = links.where((l) => l.seriesId == s.id).map((l) => l.coinId).toSet();
-      final coins = allCoins.where((c) => coinIds.contains(c.id)).toList();
+      final coins = await repo.getCoinsBySeries(s.id);
       seriesSections.add(PdfSeriesSection(title: s.name, coins: coins));
+      allPdfCoins.addAll(coins);
     }
 
     final settings = ref.read(settingsProvider);
@@ -144,7 +142,7 @@ class _SeriesListDrawerState extends ConsumerState<SeriesListDrawer> {
           appBar: AppBar(title: const Text('PDF 预览')),
           body: PdfPreview(
             build: (format) => generateCoinsPdf(
-              allCoins.where((c) => links.any((l) => _selectedSeriesIds.contains(l.seriesId) && l.coinId == c.id)).toList(),
+              allPdfCoins,
               chineseFontId: settings.chineseFontId,
               englishFontId: settings.englishFontId,
               seriesSections: seriesSections,
@@ -163,18 +161,26 @@ class _SeriesListDrawerState extends ConsumerState<SeriesListDrawer> {
     try {
       messenger.showSnackBar(const SnackBar(content: Text('正在打包...')));
       final repo = ref.read(coinRepositoryProvider);
-      final db = repo.db;
-      final links = await db.select(db.coinSeriesLink).get();
-      final selectedLinks = links.where((l) => _selectedSeriesIds.contains(l.seriesId)).toList();
-      final coinIds = selectedLinks.map((l) => l.coinId).toSet();
-      final allCoins = await db.select(db.coins).get();
-      final selectedCoins = allCoins.where((c) => coinIds.contains(c.id)).toList();
-      final allCoinImages = await db.select(db.coinImages).get();
-      final selectedCoinImages = allCoinImages.where((i) => coinIds.contains(i.coinId)).toList();
-      final series = await db.select(db.series).get();
-      final selectedSeries = series.where((s) => _selectedSeriesIds.contains(s.id)).toList();
-      final allSeriesImages = await db.select(db.seriesImages).get();
-      final selectedSeriesImages = allSeriesImages.where((i) => _selectedSeriesIds.contains(i.seriesId)).toList();
+      
+      final allSeries = await repo.getAllSeries();
+      final selectedSeries = allSeries.where((s) => _selectedSeriesIds.contains(s.id)).toList();
+      
+      final selectedLinks = <CoinSeriesLinkData>[];
+      final selectedCoins = <Coin>[];
+      final selectedCoinImages = <CoinImage>[];
+      final selectedSeriesImages = <SeriesImage>[];
+      
+      for (final s in selectedSeries) {
+        final coins = await repo.getCoinsBySeries(s.id);
+        selectedCoins.addAll(coins);
+        for (final c in coins) {
+          selectedLinks.add(CoinSeriesLinkData(coinId: c.id, seriesId: s.id));
+          final images = await repo.getCoinImages(c.id);
+          selectedCoinImages.addAll(images);
+        }
+        final images = await repo.getSeriesImages(s.id);
+        selectedSeriesImages.addAll(images);
+      }
 
       final zipBytes = await generateBackupDataBytes(
         selectedSeries, selectedCoins, selectedLinks, selectedCoinImages, selectedSeriesImages,

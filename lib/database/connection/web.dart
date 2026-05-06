@@ -1,6 +1,6 @@
 import 'package:drift/drift.dart';
 import 'package:drift/wasm.dart';
-import 'package:flutter/foundation.dart';
+import '../../utils/logger.dart';
 
 QueryExecutor connect() {
   return DatabaseConnection.delayed(Future(() async {
@@ -11,7 +11,7 @@ QueryExecutor connect() {
     );
 
     if (result.missingFeatures.isNotEmpty) {
-      debugPrint('Using ${result.chosenImplementation} due to missing browser features: ${result.missingFeatures}');
+      AppLogger.warning(logPrefixDb, 'Using ${result.chosenImplementation} due to missing browser features: ${result.missingFeatures}');
     }
 
     return result.resolvedExecutor;

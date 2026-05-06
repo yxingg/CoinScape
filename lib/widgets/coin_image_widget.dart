@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as p;
+import '../services/api_service.dart';
 
 class CoinImageWidget extends StatelessWidget {
   final String? imagePath;
@@ -59,7 +60,28 @@ class CoinImageWidget extends StatelessWidget {
           return _buildPlaceholder();
         }
       }
-      return _buildPlaceholder();
+      // Web 端：从后端服务器加载图片
+      return Image.network(
+        ApiService.getImageUrl(imagePath!),
+        width: width,
+        height: height,
+        fit: fit,
+        errorBuilder: (context, error, stackTrace) => _buildPlaceholder(),
+        loadingBuilder: (context, child, loadingProgress) {
+          if (loadingProgress == null) return child;
+          return SizedBox(
+            width: width,
+            height: height,
+            child: Center(
+              child: CircularProgressIndicator(
+                value: loadingProgress.expectedTotalBytes != null
+                    ? loadingProgress.cumulativeBytesLoaded / loadingProgress.expectedTotalBytes!
+                    : null,
+              ),
+            ),
+          );
+        },
+      );
     } else {
       // 原生环境：组装完整路径
       return FutureBuilder<Directory>(

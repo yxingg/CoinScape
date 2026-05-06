@@ -8,6 +8,7 @@ import '../database/database.dart';
 import '../providers/coin_providers.dart';
 import '../services/image_service.dart';
 import '../widgets/coin_image_widget.dart';
+import '../utils/logger.dart';
 
 class CoinEditScreen extends ConsumerStatefulWidget {
   final String? seriesId;
@@ -40,7 +41,7 @@ class _CoinEditScreenState extends ConsumerState<CoinEditScreen> {
 
   final List<String> _imagePaths = [];
   final Set<String> _selectedSeriesIds = {};
-  Uint8List? _imageBytes;
+  final Map<String, Uint8List> _imageBytesMap = {};  // 为每张图片保存字节数据
 
   @override
   void initState() {
@@ -117,14 +118,21 @@ class _CoinEditScreenState extends ConsumerState<CoinEditScreen> {
   Future<void> _pickImage() async {
     final data = await ImageService.pickImages();
     if (data.isNotEmpty) {
+      AppLogger.info(logPrefixUI, '选择了 ${data.length} 张图片');
       setState(() {
         for (final img in data) {
           if (img.path != null && img.path!.isNotEmpty) {
             _imagePaths.add(img.path!);
+            // 保存这张图片的字节数据
+            if (img.bytes != null) {
+              _imageBytesMap[img.path!] = img.bytes!;
+              AppLogger.debug(logPrefixUI, '图片已添加到编辑器: ${img.path!}, 字节数据: ${img.bytes!.length} bytes');
+            }
           }
         }
-        _imageBytes = data.first.bytes;
       });
+    } else {
+      AppLogger.debug(logPrefixUI, '没有选择任何图片');
     }
   }
 
@@ -224,7 +232,7 @@ class _CoinEditScreenState extends ConsumerState<CoinEditScreen> {
                           children: [
                             CoinImageWidget(
                               imagePath: _imagePaths.isNotEmpty ? _imagePaths.first : null,
-                              imageBytes: _imageBytes,
+                              imageBytes: _imagePaths.isNotEmpty ? _imageBytesMap[_imagePaths.first] : null,  // 传递第一张图片的字节数据
                               width: 160,
                               height: 160,
                             ),
@@ -273,7 +281,12 @@ class _CoinEditScreenState extends ConsumerState<CoinEditScreen> {
                               Expanded(
                                 child: ClipRRect(
                                   borderRadius: BorderRadius.circular(6),
-                                  child: CoinImageWidget(imagePath: path, width: 108, height: 72),
+                                  child: CoinImageWidget(
+                                    imagePath: path,
+                                    imageBytes: _imageBytesMap[path],  // 传递对应的字节数据
+                                    width: 108,
+                                    height: 72,
+                                  ),
                                 ),
                               ),
                               const SizedBox(height: 4),

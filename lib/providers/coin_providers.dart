@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../database/database.dart';
 import '../repositories/coin_repository.dart';
@@ -6,10 +7,13 @@ import '../repositories/coin_repository.dart';
 // 核心数据库及 Repository 实例对象 Provider
 // ====================================================
 
-/// 全局持有的单一数据库实例
-final databaseProvider = Provider<AppDatabase>((ref) {
+/// 全局持有的单一数据库实例（仅原生端使用）
+final databaseProvider = Provider<AppDatabase?>((ref) {
+  if (kIsWeb) {
+    // Web 端不需要本地数据库
+    return null;
+  }
   final db = AppDatabase();
-  // 当 Provider 被销毁时安全关闭数据库连接
   ref.onDispose(() => db.close());
   return db;
 });
@@ -36,7 +40,7 @@ final coinsBySeriesProvider = StreamProvider.family<List<Coin>, String>((ref, se
   return repo.watchCoinsBySeries(seriesId);
 });
 
-/// 监听库中的所有纪念币（如果需要展示“全部”视图）
+/// 监听库中的所有纪念币（如果需要展示"全部"视图）
 final allCoinsProvider = StreamProvider<List<Coin>>((ref) {
   final repo = ref.watch(coinRepositoryProvider);
   return repo.watchAllCoins();

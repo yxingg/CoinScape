@@ -9,6 +9,7 @@ import '../database/database.dart';
 import '../providers/coin_providers.dart';
 import '../services/image_service.dart';
 import '../widgets/coin_image_widget.dart';
+import '../utils/logger.dart';
 
 class SeriesEditScreen extends ConsumerStatefulWidget {
   final SeriesData? series;
@@ -25,7 +26,7 @@ class _SeriesEditScreenState extends ConsumerState<SeriesEditScreen> {
   late TextEditingController _descCtrl;
 
   final List<String> _imagePaths = [];
-  Uint8List? _imageBytes;
+  final Map<String, Uint8List> _imageBytesMap = {};  // 为每张图片保存字节数据
 
   @override
   void initState() {
@@ -56,14 +57,22 @@ class _SeriesEditScreenState extends ConsumerState<SeriesEditScreen> {
 
   Future<void> _addImages() async {
     final imgs = await ImageService.pickImages();
-    if (imgs.isEmpty) return;
+    if (imgs.isEmpty) {
+      AppLogger.debug(logPrefixUI, '系列编辑: 没有选择任何图片');
+      return;
+    }
+    AppLogger.info(logPrefixUI, '系列编辑: 选择了 ${imgs.length} 张图片');
     setState(() {
       for (final i in imgs) {
         if (i.path != null && i.path!.isNotEmpty) {
           _imagePaths.add(i.path!);
+          // 保存这张图片的字节数据
+          if (i.bytes != null) {
+            _imageBytesMap[i.path!] = i.bytes!;
+            AppLogger.debug(logPrefixUI, '系列图片已添加: ${i.path!}, 字节数据: ${i.bytes!.length} bytes');
+          }
         }
       }
-      _imageBytes = imgs.first.bytes;
     });
   }
 
@@ -127,7 +136,7 @@ class _SeriesEditScreenState extends ConsumerState<SeriesEditScreen> {
               Center(
                 child: CoinImageWidget(
                   imagePath: _imagePaths.isNotEmpty ? _imagePaths.first : null,
-                  imageBytes: _imageBytes,
+                  imageBytes: _imagePaths.isNotEmpty ? _imageBytesMap[_imagePaths.first] : null,
                   width: 140,
                   height: 140,
                 ),
@@ -155,7 +164,14 @@ class _SeriesEditScreenState extends ConsumerState<SeriesEditScreen> {
                         ),
                         child: Column(
                           children: [
-                            Expanded(child: CoinImageWidget(imagePath: _imagePaths[i], width: 108, height: 72)),
+                            Expanded(
+                              child: CoinImageWidget(
+                                imagePath: _imagePaths[i],
+                                imageBytes: _imageBytesMap[_imagePaths[i]],
+                                width: 108,
+                                height: 72,
+                              ),
+                            ),
                             Row(
                               mainAxisAlignment: MainAxisAlignment.spaceBetween,
                               children: [
