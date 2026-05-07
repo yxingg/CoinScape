@@ -165,3 +165,4 @@ This project is licensed under the **MIT License** — see the [LICENSE](LICENSE
 - [Drift](https://drift.simonbinder.eu/) — Powerful SQLite ORM
 - [Riverpod](https://riverpod.dev/) — Elegant state management solution
 - All open-source dependency maintainers
+

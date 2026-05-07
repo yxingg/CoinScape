@@ -225,32 +225,7 @@ class FontManager {
     }
   }
   
-  /// Web端存储辅助方法
-  static Future<void> _setWebStorageItem(String key, String value) async {
-    if (kIsWeb) {
-      // Web端：使用内存缓存替代localStorage
-      // 注意：这会在页面刷新后丢失，但对于字体来说可以接受
-      // 用户可以选择重新导入字体
-      _webMemoryCache[key] = Uint8List.fromList(utf8.encode(value));
-      AppLogger.warning(logPrefixFont, "Web端字体存储为内存缓存（页面刷新会丢失）");
-    }
-  }
   
-  static Future<String?> _getWebStorageItem(String key) async {
-    if (kIsWeb) {
-      final bytes = _webMemoryCache[key];
-      if (bytes != null) {
-        return utf8.decode(bytes);
-      }
-    }
-    return null;
-  }
-  
-  static Future<void> _removeWebStorageItem(String key) async {
-    if (kIsWeb) {
-      _webMemoryCache.remove(key);
-    }
-  }
 
   /// 加载字体字节
   static Future<Uint8List?> loadFont(String fontId) async {
