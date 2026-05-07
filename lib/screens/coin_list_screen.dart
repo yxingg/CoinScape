@@ -871,7 +871,8 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
         selectedSeriesIds.toList(),
       );
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        final currentContext = context;
+        ScaffoldMessenger.of(currentContext).showSnackBar(
           SnackBar(content: Text('已将 ${_selectedCoinIds.length} 枚纪念币添加到 ${selectedSeriesIds.length} 个系列')),
         );
         setState(() {
@@ -904,7 +905,8 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
     if (confirmed == true) {
       await ref.read(coinRepositoryProvider).removeCoinsFromAllSeries(_selectedCoinIds.toList());
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        final currentContext = context;
+        ScaffoldMessenger.of(currentContext).showSnackBar(
           SnackBar(content: Text('已将 ${_selectedCoinIds.length} 枚纪念币从所有系列中移除')),
         );
         setState(() {
@@ -1078,12 +1080,17 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
   }
 
   /// 云端备份上传
-  Future<void> _pushToCloud() async {
-    if (_isSyncing) return;
+Future<void> _pushToCloud() async {
+    if (!ref.read(webDavConfigProvider).isValid) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('请先配置 WebDAV')));
+      }
+      return;
+    }
+
     setState(() => _isSyncing = true);
     try {
-      final config = ref.read(webDavConfigProvider);
-      final service = SyncService(url: config.url, user: config.user, password: config.password);
+      final service = SyncService.fromConfig(ref);
       final repo = ref.read(coinRepositoryProvider);
       final series = await repo.getAllSeries();
       final coins = await repo.getAllCoins();
@@ -1121,12 +1128,17 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
   }
 
   /// 拉取合并下载
-  Future<void> _pullFromCloud() async {
-    if (_isSyncing) return;
+Future<void> _pullFromCloud() async {
+    if (!ref.read(webDavConfigProvider).isValid) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('请先配置 WebDAV')));
+      }
+      return;
+    }
+
     setState(() => _isSyncing = true);
     try {
-      final config = ref.read(webDavConfigProvider);
-      final service = SyncService(url: config.url, user: config.user, password: config.password);
+      final service = SyncService.fromConfig(ref);
       final data = await service.pullBackup();
       if (mounted) {
         await _mergeCloudData(data);

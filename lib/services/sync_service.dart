@@ -8,6 +8,10 @@ import 'dart:io';
 import '../database/database.dart';
 import '../models/sync_models.dart';
 import '../utils/logger.dart';
+import '../utils/url_helper.dart';
+import '../services/api_service.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../providers/sync_providers.dart';
 
 Future<Uint8List> generateBackupDataBytes(
   List<SeriesData> series,
@@ -62,29 +66,93 @@ Future<Uint8List> generateBackupDataBytes(
   return result;
 }
 
+/// WebDAV同步服务，支持后端代理解决Flutter Web跨域问题
 class SyncService {
-  final String url;
+  final String rawUrl;
   final String user;
   final String password;
+  final bool useProxy;
+  
+  /// 内部使用的最终URL（可能是原始URL或代理URL）
+  late final String _finalUrl;
 
   SyncService({
-    required this.url,
+    required this.rawUrl,
     required this.user,
     required this.password,
-  });
-
-  webdav.Client get client {
-    final c = webdav.newClient(
-      url,
+    bool? useProxy,
+    String? backendBaseUrl,
+  }) : useProxy = useProxy ?? false {
+    // 在构造时确定最终URL
+    _finalUrl = _determineFinalUrl(
+      rawUrl: rawUrl,
       user: user,
       password: password,
+      useProxy: useProxy ?? false,
+      backendBaseUrl: backendBaseUrl,
+    );
+  }
+
+  /// 工厂方法，从Provider获取配置创建服务
+  factory SyncService.fromConfig(WidgetRef ref) {
+    final config = ref.read(webDavConfigProvider);
+    final backendBaseUrl = ApiService.baseUrl;
+    
+    return SyncService(
+      rawUrl: config.url,
+      user: config.user,
+      password: config.password,
+      useProxy: config.proxyEnabled,
+      backendBaseUrl: backendBaseUrl,
+    );
+  }
+
+  /// 确定最终URL：如果是Web环境且启用了代理，则使用代理URL
+  String _determineFinalUrl({
+    required String rawUrl,
+    required String user,
+    required String password,
+    required bool useProxy,
+    String? backendBaseUrl,
+  }) {
+    if (kIsWeb && useProxy && backendBaseUrl != null && backendBaseUrl.isNotEmpty) {
+      // Web环境下使用代理
+      final proxyUrl = UrlHelper.rewriteWebDavUrlForWeb(
+        rawUrl,
+        backendBaseUrl,
+        useProxy,
+        username: user,
+        password: password,
+      );
+      AppLogger.debug(logPrefixSync, 'Web环境下使用代理URL: $proxyUrl (原始URL: $rawUrl)');
+      return proxyUrl ?? rawUrl;
+    }
+    
+    // 非Web环境或未启用代理，使用原始URL
+    return UrlHelper.normalizeWebDavUrl(rawUrl);
+  }
+
+  webdav.Client get client {
+    AppLogger.debug(logPrefixSync, '创建WebDAV客户端: url=$_finalUrl, user=${user.isNotEmpty ? '[已设置]' : '[未设置]'}, useProxy=$useProxy');
+    
+    // 在Web环境下使用代理时，认证信息已经包含在URL中了
+    // 所以不要再次设置用户名和密码，否则会导致重复认证或冲突
+    final shouldSetAuth = !(kIsWeb && useProxy);
+    
+    final c = webdav.newClient(
+      _finalUrl,
+      user: shouldSetAuth ? user : '',  // Web代理模式下不设置用户
+      password: shouldSetAuth ? password : '',  // Web代理模式下不设置密码
       debug: kDebugMode,
     );
+    
     // 增加超时时间以处理大文件和网络延迟
     // 特别是对于包含图片的备份文件
     c.setConnectTimeout(15000);  // 连接超时: 15秒
     c.setSendTimeout(30000);     // 上传超时: 30秒
     c.setReceiveTimeout(30000);  // 下载超时: 30秒
+    
+    AppLogger.debug(logPrefixSync, 'WebDAV客户端创建完成，超时设置: connect=15000, send=30000, receive=30000');
     return c;
   }
 
@@ -96,34 +164,104 @@ class SyncService {
     List<SeriesImage> seriesImages,
   ) async {
     final c = client;
+    AppLogger.info(logPrefixSync, '尝试连接到 WebDAV 服务器: $_finalUrl');
+    print('SYNC DEBUG: 尝试连接到 WebDAV 服务器: $_finalUrl'); // 调试输出
+    
+    try {
+      // 先尝试连接和验证
+      AppLogger.debug(logPrefixSync, '验证 WebDAV 连接...');
+      print('SYNC DEBUG: 验证 WebDAV 连接...'); // 调试输出
+      await c.readProps('/');
+      AppLogger.info(logPrefixSync, 'WebDAV 连接验证成功');
+      print('SYNC DEBUG: WebDAV 连接验证成功'); // 调试输出
+    } catch (e, st) {
+      AppLogger.error(logPrefixSync, 'WebDAV 连接验证失败: $e', st);
+      rethrow;
+    }
+    
     final zipData = await generateBackupDataBytes(series, coins, links, coinImages, seriesImages);
     const remotePath = '/latest_backup.ccm';
     AppLogger.info(logPrefixSync, '开始上传 WebDAV 备份到 $remotePath, 大小: ${zipData.length} bytes');
+    print('SYNC DEBUG: 开始上传 WebDAV 备份到 $remotePath, 大小: ${zipData.length} bytes'); // 调试输出
+    
     try {
       AppLogger.debug(logPrefixSync, '执行 WebDAV write: $remotePath');
+      print('SYNC DEBUG: 执行 WebDAV write: $remotePath'); // 调试输出
       await c.write(remotePath, zipData);
 
       AppLogger.debug(logPrefixSync, '写入完成，开始校验远端文件是否存在');
+      print('SYNC DEBUG: 写入完成，开始校验远端文件是否存在'); // 调试输出
       final remoteFile = await c.readProps(remotePath);
       AppLogger.info(logPrefixSync, '远端文件校验成功: ${remoteFile.path}');
+      print('SYNC DEBUG: 远端文件校验成功: ${remoteFile.path}'); // 调试输出
     } catch (e, st) {
-      AppLogger.error(logPrefixSync, 'WebDAV 上传失败: $e', st);
+      // 检查错误类型以提供更有用的信息
+      final errorMessage = e.toString().toLowerCase();
+      String detailedMessage = 'WebDAV 上传失败: $e';
+      
+      if (errorMessage.contains('connection') || errorMessage.contains('timeout')) {
+        detailedMessage = '网络连接失败或超时: $e';
+      } else if (errorMessage.contains('auth') || errorMessage.contains('401') || errorMessage.contains('403')) {
+        detailedMessage = '身份验证失败（用户名或密码错误）: $e';
+      } else if (errorMessage.contains('not found') || errorMessage.contains('404')) {
+        detailedMessage = '服务器路径不存在: $e';
+      } else if (errorMessage.contains('no such host')) {
+        detailedMessage = '无法解析服务器地址: $e';
+      }
+      
+      AppLogger.error(logPrefixSync, detailedMessage, st);
+      print('SYNC DEBUG ERROR: $detailedMessage'); // 调试输出
+      print('SYNC DEBUG ERROR STACK: $st'); // 调试输出
       rethrow;
     }
   }
 
   Future<SyncData> pullBackup() async {
     final c = client;
+    AppLogger.info(logPrefixSync, '尝试连接到 WebDAV 服务器: $_finalUrl');
+    print('SYNC DEBUG: 尝试连接到 WebDAV 服务器: $_finalUrl'); // 调试输出
+    
+    try {
+      // 先尝试连接和验证
+      AppLogger.debug(logPrefixSync, '验证 WebDAV 连接...');
+      print('SYNC DEBUG: 验证 WebDAV 连接...'); // 调试输出
+      await c.readProps('/');
+      AppLogger.info(logPrefixSync, 'WebDAV 连接验证成功');
+      print('SYNC DEBUG: WebDAV 连接验证成功'); // 调试输出
+    } catch (e, st) {
+      AppLogger.error(logPrefixSync, 'WebDAV 连接验证失败: $e', st);
+      rethrow;
+    }
+    
     const remotePath = '/latest_backup.ccm';
     AppLogger.info(logPrefixSync, '开始从 WebDAV 下载备份: $remotePath');
+    print('SYNC DEBUG: 开始从 WebDAV 下载备份: $remotePath'); // 调试输出
     
     List<int>? bytes;
     try {
       // Download into memory byte array
+      print('SYNC DEBUG: 执行 WebDAV read: $remotePath'); // 调试输出
       bytes = await c.read(remotePath);
       AppLogger.info(logPrefixSync, '备份下载完成, 字节数: ${bytes.length}');
+      print('SYNC DEBUG: 备份下载完成, 字节数: ${bytes.length}'); // 调试输出
     } catch (e, st) {
-      AppLogger.error(logPrefixSync, 'WebDAV 下载失败: $e', st);
+      // 检查错误类型以提供更有用的信息
+      final errorMessage = e.toString().toLowerCase();
+      String detailedMessage = 'WebDAV 下载失败: $e';
+      
+      if (errorMessage.contains('connection') || errorMessage.contains('timeout')) {
+        detailedMessage = '网络连接失败或超时: $e';
+      } else if (errorMessage.contains('auth') || errorMessage.contains('401') || errorMessage.contains('403')) {
+        detailedMessage = '身份验证失败（用户名或密码错误）: $e';
+      } else if (errorMessage.contains('not found') || errorMessage.contains('404')) {
+        detailedMessage = '备份文件不存在: $e';
+      } else if (errorMessage.contains('no such host')) {
+        detailedMessage = '无法解析服务器地址: $e';
+      }
+      
+      AppLogger.error(logPrefixSync, detailedMessage, st);
+      print('SYNC DEBUG ERROR: $detailedMessage'); // 调试输出
+      print('SYNC DEBUG ERROR STACK: $st'); // 调试输出
       rethrow;
     }
     

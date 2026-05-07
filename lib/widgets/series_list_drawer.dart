@@ -136,7 +136,7 @@ class _SeriesListDrawerState extends ConsumerState<SeriesListDrawer> {
     }
 
     final settings = ref.read(settingsProvider);
-    if (context.mounted) {
+    if (mounted) {
       Navigator.push(context, MaterialPageRoute(
         builder: (ctx) => Scaffold(
           appBar: AppBar(title: const Text('PDF 预览')),

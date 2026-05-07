@@ -1,5 +1,5 @@
 import 'dart:async';
-import 'dart:ui' show PlatformDispatcher;
+import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -9,6 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'screens/home_screen.dart';
 import 'providers/sync_providers.dart';
 import 'utils/logger.dart';
+import 'services/api_service.dart' as api_service;
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -51,6 +52,9 @@ void main() async {
     // 禁用 Web 环境下浏览器的默认右键菜单
     if (kIsWeb) {
       BrowserContextMenu.disableContextMenu();
+      
+      // 加载保存的后端URL
+      await api_service.ApiService.loadSavedBaseUrl();
     }
 
     // 初始化 SharedPreferences

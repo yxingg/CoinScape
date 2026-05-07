@@ -18,11 +18,15 @@ import json
 import shutil
 import uuid
 import logging
+import logging.handlers
+import base64  # 添加base64导入
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Dict, List
+from urllib.parse import urlparse, quote
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Body
-from fastapi.responses import FileResponse, JSONResponse, Response
+import httpx
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Body, Request
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -39,26 +43,141 @@ LOG_FILE_PATH = os.path.join(LOG_DIR, "coinscape.log")
 
 
 def setup_logging() -> None:
+    """
+    设置Python日志系统，包含异常捕获和日志轮转
+    """
     os.makedirs(LOG_DIR, exist_ok=True)
 
     root_logger = logging.getLogger()
-    root_logger.setLevel(logging.INFO)
+    root_logger.setLevel(logging.DEBUG)  # 临时设置为DEBUG以排查问题
 
-    formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+    # 自定义Formatter，包含模块前缀
+    class CoinScapeFormatter(logging.Formatter):
+        def format(self, record: logging.LogRecord) -> str:
+            # 从logger名称中提取模块名
+            logger_name = record.name
+            if logger_name == "coinscape":
+                module = "[MAIN]"
+            elif "." in logger_name:
+                module_parts = logger_name.split(".")
+                if len(module_parts) > 1:
+                    module = f"[{module_parts[-1].upper()}]"
+                else:
+                    module = f"[{module_parts[0].upper()}]"
+            else:
+                module = f"[{logger_name.upper()}]"
+            
+            # 格式化日志消息
+            record.message = record.getMessage()
+            record.asctime = self.formatTime(record, self.datefmt)
+            
+            # 构建最终的日志行
+            level_str = record.levelname
+            if hasattr(record, 'exc_info') and record.exc_info:
+                exc_type, exc_value, exc_traceback = record.exc_info
+                if exc_type and exc_value:
+                    record.exc_text = f"Exception: {exc_type.__name__}: {exc_value}"
+            
+            return f"{record.asctime} {level_str:<8} {module} {record.message}"
 
-    file_handler = logging.FileHandler(LOG_FILE_PATH, encoding="utf-8")
-    file_handler.setLevel(logging.INFO)
-    file_handler.setFormatter(formatter)
+    formatter = CoinScapeFormatter("%(asctime)s", datefmt="%Y-%m-%d %H:%M:%S")
 
+    # 文件处理器 - 使用RotatingFileHandler实现日志轮转
+    try:
+        # 最大10MB，最多保留5个备份文件
+        file_handler = logging.handlers.RotatingFileHandler(
+            LOG_FILE_PATH, 
+            encoding="utf-8",
+            maxBytes=10 * 1024 * 1024,  # 10MB
+            backupCount=5
+        )
+        file_handler.setLevel(logging.INFO)
+        file_handler.setFormatter(formatter)
+    except Exception as e:
+        # 如果文件日志失败，只使用控制台
+        print(f"无法初始化文件日志: {e}")
+        file_handler = None
+
+    # 控制台处理器
     console_handler = logging.StreamHandler()
     console_handler.setLevel(logging.INFO)
     console_handler.setFormatter(formatter)
 
+    # 清除现有处理器，添加新的
     root_logger.handlers.clear()
-    root_logger.addHandler(file_handler)
+    
+    if file_handler:
+        root_logger.addHandler(file_handler)
     root_logger.addHandler(console_handler)
 
-    logging.getLogger("coinscape").info("日志文件路径: %s", os.path.abspath(LOG_FILE_PATH))
+    # 为coinscape日志器设置额外配置
+    app_logger = logging.getLogger("coinscape")
+    app_logger.setLevel(logging.INFO)
+    
+    # 设置全局异常钩子
+    import sys
+    sys.excepthook = _handle_uncaught_exception
+    
+    app_logger.info("日志系统初始化完成")
+    if file_handler:
+        app_logger.info("日志文件路径: %s", os.path.abspath(LOG_FILE_PATH))
+    else:
+        app_logger.warning("日志文件未启用，仅输出到控制台")
+
+
+def _handle_uncaught_exception(exc_type, exc_value, exc_traceback):
+    """
+    处理未捕获的异常，记录到日志中
+    """
+    if issubclass(exc_type, KeyboardInterrupt):
+        # 如果是KeyboardInterrupt，使用默认处理
+        sys.__excepthook__(exc_type, exc_value, exc_traceback)
+        return
+    
+    logger = logging.getLogger("coinscape.exception")
+    logger.error(
+        f"未捕获的异常: {exc_type.__name__}: {exc_value}",
+        exc_info=(exc_type, exc_value, exc_traceback)
+    )
+    
+    # 仍然打印到stderr
+    sys.__excepthook__(exc_type, exc_value, exc_traceback)
+
+
+# ============================================================
+# FastAPI全局异常处理器
+# ============================================================
+
+def add_exception_handlers_to_app(app):
+    """
+    为FastAPI应用添加全局异常处理器
+    """
+    import traceback
+    
+    @app.exception_handler(Exception)
+    async def general_exception_handler(request, exc):
+        """
+        处理所有未捕获的异常
+        """
+        logger = logging.getLogger("coinscape.api.exception")
+        exc_type = type(exc).__name__
+        exc_message = str(exc)
+        exc_traceback = traceback.format_exc()
+        
+        logger.error(
+            f"API异常 - {exc_type}: {exc_message}\n请求: {request.method} {request.url}\n{traceback.format_exc()}",
+            extra={'exc_info': False}  # 不重复记录堆栈
+        )
+        
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "error",
+                "message": f"服务器内部错误: {exc_message}",
+                "error_type": exc_type,
+                "detail": "查看服务器日志获取详细信息"
+            }
+        )
 
 
 setup_logging()
@@ -78,6 +197,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 为应用添加全局异常处理器
+# 注意: add_exception_handlers_to_app函数需要在app创建后调用
 
 # ============================================================
 # Health check (must be before static file routes)
@@ -361,6 +483,215 @@ async def import_data(data: dict = Body(...)):
 
 
 # ============================================================
+# WebDAV Proxy API (解决Flutter Web跨域问题)
+# ============================================================
+
+
+
+# 使用app.add_route来支持任意HTTP方法
+# FastAPI的api_route可能对非标准方法支持有限
+async def proxy_webdav_handler(request: Request):
+    return await proxy_webdav_impl(request)
+
+# 为每个WebDAV方法注册路由
+# 使用路径参数来捕获WebDAV路径：/api/proxy/webdav/{webdav_path:path}
+webdav_methods = ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PROPFIND", "PROPPATCH", "MKCOL", "COPY", "MOVE", "LOCK", "UNLOCK"]
+
+# 两个版本的路由：带路径参数和不带
+for method in webdav_methods:
+    # 版本1：带WebDAV路径参数
+    app.add_route("/api/proxy/webdav/{webdav_path:path}", proxy_webdav_handler, methods=[method])
+    # 版本2：不带路径参数（兼容旧格式）
+    app.add_route("/api/proxy/webdav", proxy_webdav_handler, methods=[method])
+
+# 实际的代理实现函数
+async def proxy_webdav_impl(request: Request):
+    """
+    代理WebDAV请求，解决Flutter Web跨域问题。
+    前端将真正的WebDAV地址作为query参数target传递。
+    """
+    logger = logging.getLogger("coinscape.proxy")
+    
+    # 记录调试信息
+    logger.debug(f"Proxy request: method={request.method}, url={request.url}")
+    logger.debug(f"Path: {request.url.path}, query: {request.url.query}")
+    
+    # 获取目标地址和认证信息
+    target_url = request.query_params.get("target")
+    username = request.query_params.get("user")
+    password = request.query_params.get("password")
+    
+    if not target_url:
+        raise HTTPException(status_code=400, detail="Missing 'target' query parameter")
+    
+    logger.debug(f"Target: {target_url}, user: {username}, password length: {len(password) if password else 0}")
+    
+    # 获取WebDAV路径参数（如果提供）
+    webdav_path = request.path_params.get("webdav_path", "")
+    if webdav_path:
+        logger.debug(f"WebDAV path from URL: {webdav_path}")
+    
+    try:
+        # 解析目标URL
+        parsed_target = urlparse(target_url)
+        if not parsed_target.scheme or not parsed_target.netloc:
+            raise HTTPException(status_code=400, detail="Invalid target URL")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid target URL: {e}")
+    
+    # 如果提供了WebDAV路径，追加到目标URL
+    if webdav_path:
+        # 将WebDAV路径追加到目标URL
+        target_url = target_url.rstrip('/') + '/' + webdav_path.lstrip('/')
+        logger.debug(f"Final target URL with path from URL: {target_url}")
+    else:
+        # 尝试从password参数中提取路径（处理客户端错误格式）
+        if password and '/' in password:
+            # password可能包含路径，如 "password/path/to/file"
+            # 检查是否是这种情况
+            password_parts = password.split('/')
+            if len(password_parts) > 1:
+                # 第一部分是真正的密码，其余部分是路径
+                real_password = password_parts[0]
+                extra_path = '/'.join(password_parts[1:])
+                # 更新password和target_url
+                password = real_password
+                target_url = target_url.rstrip('/') + '/' + extra_path.lstrip('/')
+                logger.debug(f"Extracted path from password parameter: {extra_path}")
+                logger.debug(f"Updated target URL: {target_url}, password: {password}")
+    
+    # 对于OPTIONS方法（预检请求），直接返回CORS头，不转发
+    if request.method == "OPTIONS":
+        # 返回CORS预检响应
+        return Response(
+            status_code=200,
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS, PROPFIND, PROPPATCH, MKCOL, COPY, MOVE, LOCK, UNLOCK",
+                "Access-Control-Allow-Headers": "*",
+                "Access-Control-Max-Age": "86400",  # 24小时缓存
+            }
+        )
+    
+    # 准备代理请求头
+    headers = dict(request.headers)
+    # 移除可能引起跨域冲突的头
+    forbidden_headers = [
+        "host", "origin", "referer", "content-length", 
+        "content-encoding", "transfer-encoding", "connection",
+        "upgrade", "accept-encoding", "accept-language",
+        "accept-charset"  # 浏览器拒绝的不安全头
+    ]
+    for header in forbidden_headers:
+        if header in headers:
+            del headers[header]
+    
+    # 添加必要头
+    headers["Host"] = parsed_target.netloc
+    
+    # 为WebDAV请求添加额外头部
+    if request.method in ["PROPFIND", "PROPPATCH", "MKCOL", "COPY", "MOVE", "LOCK", "UNLOCK"]:
+        # 确保有Depth头，WebDAV常用
+        if "depth" not in headers:
+            if request.method == "PROPFIND":
+                headers["Depth"] = "1"  # PROPFIND通常需要Depth头
+        
+        # 确保有Content-Type头对于某些WebDAV方法
+        if request.method in ["PROPPATCH", "LOCK"]:
+            if "content-type" not in headers:
+                headers["Content-Type"] = "application/xml; charset=utf-8"
+        
+        # 添加Accept头用于WebDAV响应
+        if "accept" not in headers:
+            headers["Accept"] = "*/*"
+        
+        # 添加DAV头
+        headers["DAV"] = "1"
+    
+    # 如果提供了用户名和密码，添加Basic Auth头
+    if username and password:
+        try:
+            auth_string = f"{username}:{password}"
+            auth_bytes = auth_string.encode('utf-8')
+            auth_b64 = base64.b64encode(auth_bytes).decode('utf-8')
+            headers["Authorization"] = f"Basic {auth_b64}"
+            logger.debug(f"Added Basic Auth header for user: {username}")
+        except Exception as e:
+            logger.error(f"Failed to create Basic Auth header: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to create authentication header: {e}")
+    
+    # 准备请求体 - 始终读取请求体，但对于没有体的一些方法，可能是空的
+    try:
+        body_content = await request.body()
+    except:
+        body_content = b""
+    
+    logger.info(f"Proxying {request.method} request to {target_url}")
+    logger.debug(f"Request headers: {headers}")
+    logger.debug(f"Request method: {request.method}")
+    logger.debug(f"Request body size: {len(body_content) if body_content else 0}")
+    
+    # 使用httpx异步客户端转发请求
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
+        try:
+            # 构造请求
+            logger.debug(f"Forwarding request: {request.method} {target_url}, headers: {headers.keys()}, body size: {len(body_content)}")
+            
+            proxy_response = await client.request(
+                method=request.method,
+                url=target_url,
+                headers=headers,
+                content=body_content,  # 可能是空字节b""
+                follow_redirects=True
+            )
+            
+            # 准备响应头
+            response_headers = dict(proxy_response.headers)
+            # 移除WebDAV可能返回的跨域头，避免冲突
+            cors_headers_to_remove = [
+                "access-control-allow-origin",
+                "access-control-allow-methods", 
+                "access-control-allow-headers",
+                "access-control-allow-credentials",
+                "access-control-expose-headers",
+                "access-control-max-age"
+            ]
+            for cors_header in cors_headers_to_remove:
+                if cors_header in response_headers:
+                    del response_headers[cors_header]
+            
+            # 添加必要的CORS头以允许Flutter Web访问
+            response_headers["Access-Control-Allow-Origin"] = "*"
+            response_headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS, PROPFIND, PROPPATCH, MKCOL, COPY, MOVE, LOCK, UNLOCK"
+            response_headers["Access-Control-Allow-Headers"] = "*"
+            
+            # 返回代理响应
+            return Response(
+                content=proxy_response.content,
+                status_code=proxy_response.status_code,
+                headers=response_headers,
+                media_type=proxy_response.headers.get("content-type")
+            )
+            
+        except httpx.TimeoutException:
+            logger.error(f"Timeout while proxying to {target_url}")
+            raise HTTPException(status_code=504, detail="Gateway timeout")
+        except httpx.HTTPStatusError as e:
+            logger.error(f"HTTP error while proxying to {target_url}: {e.response.status_code}")
+            logger.error(f"Response body: {e.response.text[:500]}")
+            # 透传目标服务器的HTTP错误状态码
+            raise HTTPException(status_code=e.response.status_code, detail=f"Target server error: {e.response.status_code}")
+        except httpx.RequestError as e:
+            logger.error(f"Request error while proxying to {target_url}: {e}")
+            logger.exception("Request error details:")
+            raise HTTPException(status_code=502, detail=f"Bad gateway: {str(e)[:200]}")
+        except Exception as e:
+            logger.error(f"Unexpected error while proxying: {e}")
+            logger.exception("Full exception traceback:")
+            raise HTTPException(status_code=500, detail=f"Internal proxy error: {str(e)[:200]}")
+
+
+# ============================================================
 # Static files (Flutter Web build output) - mounted AFTER API routes
 # ============================================================
 
@@ -417,6 +748,9 @@ async def startup():
 # ============================================================
 # Entry point
 # ============================================================
+
+# 添加全局异常处理器到FastAPI应用
+add_exception_handlers_to_app(app)
 
 if __name__ == "__main__":
     import uvicorn

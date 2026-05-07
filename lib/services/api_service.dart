@@ -2,17 +2,45 @@ import 'dart:convert';
 import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 
 /// API 服务 - 封装所有与 Python 后端的 HTTP 通信
 /// 仅在 Web 端使用，原生端仍然使用 Drift 本地数据库
 class ApiService {
   // 后端地址，可通过设置页面修改
   static String _baseUrl = 'http://localhost:9876';
+  static const String _backendUrlKey = 'backend_base_url';
 
   static String get baseUrl => _baseUrl;
 
   static void setBaseUrl(String url) {
     _baseUrl = url.endsWith('/') ? url.substring(0, url.length - 1) : url;
+  }
+
+  /// 从SharedPreferences加载保存的后端URL
+  static Future<void> loadSavedBaseUrl() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final savedUrl = prefs.getString(_backendUrlKey);
+      if (savedUrl != null && savedUrl.isNotEmpty) {
+        setBaseUrl(savedUrl);
+      }
+    } catch (e) {
+      // 如果加载失败，使用默认值
+      print('Failed to load saved backend URL: $e');
+    }
+  }
+
+  /// 保存后端URL到SharedPreferences
+  static Future<void> saveBaseUrl(String url) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_backendUrlKey, url);
+      setBaseUrl(url);
+    } catch (e) {
+      print('Failed to save backend URL: $e');
+      rethrow;
+    }
   }
 
   static String get apiUrl => '$_baseUrl/api';

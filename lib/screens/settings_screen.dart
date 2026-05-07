@@ -1,17 +1,19 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
-import 'package:flutter/foundation.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:drift/drift.dart' as drift;
+import 'package:shared_preferences/shared_preferences.dart';
 
+import '../providers/settings_provider.dart';
 import '../providers/sync_providers.dart';
 import '../providers/coin_providers.dart';
-import '../providers/settings_provider.dart';
 import '../services/sync_service.dart';
-import '../services/font_manager.dart';
 import '../services/api_service.dart';
-import '../models/sync_models.dart';
+import '../services/font_manager.dart';
 import '../database/database.dart';
 import '../utils/logger.dart';
+import '../models/sync_models.dart';
 
 class SettingsScreen extends ConsumerStatefulWidget {
   const SettingsScreen({super.key});
@@ -33,18 +35,36 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   bool _isCheckingBackend = false;
   bool _isLoadingConfig = false;
   bool _isSavingPath = false;
+  
+  // 日志配置相关
+  LogLevel _selectedLogLevel = LogLevel.info;
+  bool _isLoadingLogLevel = false;
 
   @override
   void initState() {
     super.initState();
-    final config = ref.read(webDavConfigProvider);
-    _urlCtrl = TextEditingController(text: config.url);
-    _userCtrl = TextEditingController(text: config.user);
-    _pwdCtrl = TextEditingController(text: config.password);
+    _urlCtrl = TextEditingController();
+    _userCtrl = TextEditingController();
+    _pwdCtrl = TextEditingController();
     _backendUrlCtrl = TextEditingController(text: ApiService.baseUrl);
     _savePathCtrl = TextEditingController();
-    _checkBackendConnection();
-    _loadSavePath();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _initializeFromProvider();
+      _checkBackendConnection();
+      _loadSavePath();
+      _loadLogLevel();
+      
+      // 测试日志系统是否工作
+      print('SETTINGS SCREEN INIT: 设置屏幕初始化完成');
+      AppLogger.info(logPrefixSettings, '设置屏幕初始化完成 - 测试日志');
+    });
+  }
+
+  void _initializeFromProvider() {
+    final config = ref.read(webDavConfigProvider);
+    _urlCtrl.text = config.url;
+    _userCtrl.text = config.user;
+    _pwdCtrl.text = config.password;
   }
 
   @override
@@ -54,6 +74,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     _pwdCtrl.dispose();
     _backendUrlCtrl.dispose();
     _savePathCtrl.dispose();
+    
     super.dispose();
   }
 
@@ -69,17 +90,163 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   }
 
   Future<void> _loadSavePath() async {
-    if (!kIsWeb) return;
     setState(() => _isLoadingConfig = true);
     try {
       final config = await ApiService.getConfig();
       if (mounted) {
         _savePathCtrl.text = config['save_path'] as String? ?? '';
       }
-    } catch (_) {
-      // 忽略加载失败
+    } catch (e) {
+      // 忽略错误，保持空值
     } finally {
-      if (mounted) setState(() => _isLoadingConfig = false);
+      if (mounted) {
+        setState(() => _isLoadingConfig = false);
+      }
+    }
+  }
+
+  /// 加载日志级别
+  Future<void> _loadLogLevel() async {
+    setState(() => _isLoadingLogLevel = true);
+    try {
+      // 从SharedPreferences加载保存的日志级别
+      final prefs = await SharedPreferences.getInstance();
+      final savedLevel = prefs.getString('log_level');
+      if (savedLevel != null) {
+        final level = LogLevel.values.firstWhere(
+          (e) => e.name == savedLevel,
+          orElse: () => LogLevel.info,
+        );
+        setState(() => _selectedLogLevel = level);
+        AppLogger.setLogLevel(level);
+      }
+    } catch (e) {
+      AppLogger.error(logPrefixSettings, '加载日志级别失败: $e');
+    } finally {
+      if (mounted) {
+        setState(() => _isLoadingLogLevel = false);
+      }
+    }
+  }
+
+  /// 保存日志级别
+  Future<void> _saveLogLevel() async {
+    setState(() => _isLoadingLogLevel = true);
+    try {
+      // 保存到SharedPreferences
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('log_level', _selectedLogLevel.name);
+      
+      // 更新AppLogger
+      AppLogger.setLogLevel(_selectedLogLevel);
+      
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('日志级别已设置为: ${_selectedLogLevel.name.toUpperCase()}'),
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
+    } catch (e) {
+      AppLogger.error(logPrefixSettings, '保存日志级别失败: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('保存日志级别失败: $e'),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isLoadingLogLevel = false);
+      }
+    }
+  }
+
+  /// 清空日志文件
+  Future<void> _clearLogFile() async {
+    try {
+      if (kIsWeb) {
+        // Web平台使用localStorage
+        try {
+          await AppLogger.clearWebLogs();
+          
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Web日志已清空'),
+                duration: const Duration(seconds: 3),
+              ),
+            );
+          }
+          AppLogger.info(logPrefixSettings, 'Web日志已清空');
+        } catch (e) {
+          AppLogger.error(logPrefixSettings, '清空Web日志失败: $e');
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('清空日志失败: $e'),
+                backgroundColor: Colors.red,
+                duration: const Duration(seconds: 3),
+              ),
+            );
+          }
+        }
+        return;
+      }
+      
+      // 桌面/移动平台使用文件系统
+      final logPath = await AppLogger.getConfiguredLogPath();
+      if (logPath != null) {
+        final file = File(logPath);
+        if (await file.exists()) {
+          await file.writeAsString('');
+          
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('日志文件已清空'),
+                duration: const Duration(seconds: 3),
+              ),
+            );
+          }
+          AppLogger.info(logPrefixSettings, '日志文件已清空');
+        } else {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('日志文件不存在'),
+                backgroundColor: Colors.orange,
+                duration: const Duration(seconds: 3),
+              ),
+            );
+          }
+        }
+      } else {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('无法获取日志文件路径'),
+              backgroundColor: Colors.red,
+              duration: const Duration(seconds: 3),
+            ),
+          );
+        }
+      }
+    } catch (e) {
+      AppLogger.error(logPrefixSettings, '清空日志文件失败: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('清空日志文件失败: $e'),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
     }
   }
 
@@ -105,6 +272,28 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     }
   }
 
+  Future<void> _saveBackendUrl() async {
+    final url = _backendUrlCtrl.text.trim();
+    if (url.isEmpty) return;
+    
+    try {
+      await ApiService.saveBaseUrl(url);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('后端服务地址已保存')),
+        );
+        // 刷新连接状态
+        await _checkBackendConnection();
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('保存失败: $e')),
+        );
+      }
+    }
+  }
+
   Future<void> _saveConfig() async {
     if (_formKey.currentState!.validate()) {
       await ref.read(webDavConfigProvider.notifier).saveConfig(
@@ -119,18 +308,19 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   }
 
   SyncService _getService() {
-    final config = ref.read(webDavConfigProvider);
-    return SyncService(url: config.url, user: config.user, password: config.password);
+    return SyncService.fromConfig(ref);
   }
 
   Future<void> _push() async {
     if (!ref.read(webDavConfigProvider).isValid) {
        AppLogger.warning(logPrefixSettings, 'WebDAV 未配置');
+       print('SETTINGS DEBUG: WebDAV 未配置'); // 调试输出
        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('请先配置并保存 WebDAV')));
        return;
     }
     setState(() => _isSyncing = true);
     AppLogger.info(logPrefixSettings, '开始 WebDAV 上传...');
+    print('SETTINGS DEBUG: 开始 WebDAV 上传...'); // 调试输出
     try {
       final repo = ref.read(coinRepositoryProvider);
       final series = await repo.getAllSeries();
@@ -154,20 +344,30 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       }
 
       AppLogger.info(logPrefixSettings, '数据汇总: ${series.length} 个业务, ${coins.length} 枚纪念币');
+      print('SETTINGS DEBUG: 数据汇总: ${series.length} 个业务, ${coins.length} 枚纪念币'); // 调试输出
       final service = _getService();
+      print('SETTINGS DEBUG: 调用 service.pushBackup()...'); // 调试输出
       await service.pushBackup(series, coins, links, coinImages, seriesImages);
       
       AppLogger.info(logPrefixSettings, 'WebDAV 上传成功');
+      print('SETTINGS DEBUG: WebDAV 上传成功'); // 调试输出
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('推送(上传)成功！')));
       }
     } catch (e, st) {
-      AppLogger.error(logPrefixSettings, '上传失败: $e', st);
+      // 显示更详细的错误信息
+      final errorStr = e.toString();
+      final fullError = '上传失败: $errorStr\n类型: ${e.runtimeType}\n栈追踪: $st';
+      AppLogger.error(logPrefixSettings, fullError, st);
+      print('🎯 SETTINGS ERROR: 上传失败 - $errorStr');
+      print('🎯 SETTINGS ERROR TYPE: ${e.runtimeType}');
+      print('🎯 SETTINGS ERROR STACK: $st');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('云同步上传失败: $e')));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('云端备份失败: $errorStr')));
       }
     } finally {
       if (mounted) setState(() => _isSyncing = false);
+      print('SETTINGS DEBUG: 上传操作完成'); // 调试输出
     }
   }
 
@@ -193,9 +393,15 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('拉取(下载)并合并成功！')));
       }
     } catch (e, st) {
-      AppLogger.error(logPrefixSettings, '下载失败: $e', st);
+      // 显示更详细的错误信息
+      final errorStr = e.toString();
+      final fullError = '下载失败: $errorStr\n类型: ${e.runtimeType}\n栈追踪: $st';
+      AppLogger.error(logPrefixSettings, fullError, st);
+      print('🎯 SETTINGS ERROR: 下载失败 - $errorStr');
+      print('🎯 SETTINGS ERROR TYPE: ${e.runtimeType}');
+      print('🎯 SETTINGS ERROR STACK: $st');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('云同步下载失败: $e')));
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('云端备份下载失败: $errorStr')));
       }
     } finally {
       if (mounted) setState(() => _isSyncing = false);
@@ -317,6 +523,202 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     }
     for (final img in incomingSeriesImages) {
       await repo.replaceSeriesImages(img.seriesId, [img.imagePath]);
+    }
+  }
+
+  /// 构建日志配置卡片
+  Widget _buildLogSettingsCard() {
+    return Card(
+      elevation: 2,
+      margin: const EdgeInsets.only(bottom: 24),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 8.0),
+        child: Column(
+          children: [
+            const ListTile(
+              title: Text('日志配置', style: TextStyle(fontWeight: FontWeight.bold)),
+              subtitle: Text('配置日志级别和清理日志文件'),
+              leading: Icon(Icons.article),
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16.0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  // 当前日志文件路径显示（仅信息）
+                  if (AppLogger.logFilePath != null && !kIsWeb)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 12.0),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.info_outline, size: 16, color: Colors.blue),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              '日志文件: ${AppLogger.logFilePath}',
+                              style: const TextStyle(fontSize: 12, color: Colors.blueGrey),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+
+                  // 日志级别选择标题
+                  const Text('日志级别:', style: TextStyle(fontWeight: FontWeight.w500, fontSize: 14)),
+                  const SizedBox(height: 8),
+                  
+                  // 日志级别选择Radio按钮
+                  ...LogLevel.values.map((level) {
+                    return RadioListTile<LogLevel>(
+                      title: Text(
+                        '${level.name.toUpperCase()} (${_getLogLevelDescription(level)})',
+                        style: const TextStyle(fontSize: 14),
+                      ),
+                      subtitle: Text(_getLogLevelDetails(level)),
+                      value: level,
+                      groupValue: _selectedLogLevel,
+                      onChanged: _isLoadingLogLevel ? null : (value) {
+                        if (value != null) {
+                          setState(() => _selectedLogLevel = value);
+                        }
+                      },
+                      dense: true,
+                      contentPadding: EdgeInsets.zero,
+                    );
+                  }).toList(),
+                  
+                  const SizedBox(height: 16),
+                  
+                  // 操作按钮
+                  Column(
+                    children: [
+                      // 保存日志级别按钮
+                      ElevatedButton.icon(
+                        onPressed: _isLoadingLogLevel ? null : _saveLogLevel,
+                        icon: _isLoadingLogLevel
+                            ? const SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(strokeWidth: 2),
+                              )
+                            : const Icon(Icons.save, size: 18),
+                        label: Text(_isLoadingLogLevel ? '保存中...' : '保存日志级别'),
+                        style: ElevatedButton.styleFrom(
+                          minimumSize: const Size(double.infinity, 44),
+                        ),
+                      ),
+                      
+                      const SizedBox(height: 12),
+                      
+                      // 清空日志文件按钮
+                      ElevatedButton.icon(
+                        onPressed: _clearLogFile,
+                        icon: const Icon(Icons.delete_sweep, size: 18),
+                        label: const Text('清空日志文件'),
+                        style: ElevatedButton.styleFrom(
+                          minimumSize: const Size(double.infinity, 44),
+                          backgroundColor: Colors.orange.shade100,
+                          foregroundColor: Colors.orange.shade900,
+                        ),
+                      ),
+                      
+                      const SizedBox(height: 12),
+                      
+                      // 生成测试日志按钮
+                      ElevatedButton.icon(
+                        onPressed: _generateTestLogs,
+                        icon: const Icon(Icons.bug_report, size: 18),
+                        label: const Text('生成测试日志'),
+                        style: ElevatedButton.styleFrom(
+                          minimumSize: const Size(double.infinity, 44),
+                          backgroundColor: Colors.blueGrey.shade100,
+                          foregroundColor: Colors.blueGrey.shade800,
+                        ),
+                      ),
+                    ],
+                  ),
+                  
+                  const SizedBox(height: 8),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  
+
+  /// 获取日志级别描述
+  String _getLogLevelDescription(LogLevel level) {
+    switch (level) {
+      case LogLevel.debug:
+        return '所有日志';
+      case LogLevel.info:
+        return '信息及以上';
+      case LogLevel.warning:
+        return '警告及以上';
+      case LogLevel.error:
+        return '仅错误';
+    }
+  }
+
+  /// 获取日志级别详细信息
+  String _getLogLevelDetails(LogLevel level) {
+    switch (level) {
+      case LogLevel.debug:
+        return '记录DEBUG, INFO, WARNING, ERROR所有级别';
+      case LogLevel.info:
+        return '记录INFO, WARNING, ERROR级别（不记录DEBUG）';
+      case LogLevel.warning:
+        return '记录WARNING, ERROR级别（不记录DEBUG, INFO）';
+      case LogLevel.error:
+        return '仅记录ERROR级别';
+    }
+  }
+
+  /// 生成测试日志
+  Future<void> _generateTestLogs() async {
+    try {
+      AppLogger.debug(logPrefixSettings, '这是一个调试级别的测试日志');
+      AppLogger.info(logPrefixSettings, '这是一个信息级别的测试日志');
+      AppLogger.warning(logPrefixSettings, '这是一个警告级别的测试日志');
+      AppLogger.error(logPrefixSettings, '这是一个错误级别的测试日志');
+      
+      // 使用模块化的日志方法
+      AppLogger.moduleInfo('database', '数据库连接测试');
+      AppLogger.moduleWarning('sync', '同步过程警告');
+      AppLogger.moduleError('api', 'API调用失败', StackTrace.current);
+      
+      // 测试方法调用日志
+      AppLogger.methodCall('SettingsScreen', '_generateTestLogs');
+      AppLogger.methodCall('TestService', 'processData', params: {
+        'id': '12345',
+        'name': '测试数据',
+        'count': 42,
+      });
+      
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('测试日志已生成，请检查日志文件'),
+            duration: Duration(seconds: 3),
+          ),
+        );
+      }
+    } catch (e) {
+      AppLogger.error(logPrefixSettings, '生成测试日志失败: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('生成测试日志失败: $e'),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
     }
   }
 
@@ -467,11 +869,11 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             Container(
               padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
-                color: _isBackendConnected ? Colors.green.withOpacity(0.1) : Colors.red.withOpacity(0.1),
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(
-                  color: _isBackendConnected ? Colors.green.withOpacity(0.3) : Colors.red.withOpacity(0.3),
-                ),
+color: _isBackendConnected ? const Color.fromRGBO(76, 175, 80, 0.1) : const Color.fromRGBO(244, 67, 54, 0.1),
+                 borderRadius: BorderRadius.circular(8),
+                 border: Border.all(
+                   color: _isBackendConnected ? const Color.fromRGBO(76, 175, 80, 0.3) : const Color.fromRGBO(244, 67, 54, 0.3),
+                 ),
               ),
               child: Row(
                 children: [
@@ -510,6 +912,40 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                   ),
                 ],
               ),
+            ),
+            const SizedBox(height: 16),
+            const Divider(),
+            const SizedBox(height: 8),
+            // 后端服务地址配置
+            Row(
+              children: [
+                Icon(Icons.link, color: Theme.of(context).colorScheme.primary),
+                const SizedBox(width: 8),
+                const Text('后端服务地址', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+              ],
+            ),
+            const SizedBox(height: 4),
+            const Text('设置Flutter Web连接的后端服务器地址，用于WebDAV代理等功能。', style: TextStyle(color: Colors.grey, fontSize: 13)),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Expanded(
+                  child: TextFormField(
+                    controller: _backendUrlCtrl,
+                    decoration: const InputDecoration(
+                      labelText: '后端服务地址',
+                      hintText: '例如: http://localhost:9876',
+                      border: OutlineInputBorder(),
+                      prefixIcon: Icon(Icons.dns),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                ElevatedButton(
+                  onPressed: _saveBackendUrl,
+                  child: const Text('保存'),
+                ),
+              ],
             ),
             const SizedBox(height: 16),
             const Divider(),
@@ -569,6 +1005,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
   /// 构建 WebDAV 云同步配置卡片
   Widget _buildWebDavConfigCard() {
+    final webDavConfig = ref.watch(webDavConfigProvider);
+    
     return Card(
       elevation: 2,
       margin: const EdgeInsets.only(bottom: 24),
@@ -586,6 +1024,59 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             ),
             const SizedBox(height: 8),
             const Text('配置支持 WebDAV 的网盘（例如坚果云），以实现数据的无服务器同步。', style: TextStyle(color: Colors.grey, fontSize: 13)),
+            
+            // 后端代理设置（仅Web端显示）
+            if (kIsWeb) ...[
+              const SizedBox(height: 16),
+              Card(
+                elevation: 1,
+                color: Colors.blue.shade50,
+                child: Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Flutter Web 跨域解决方案',
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 14,
+                          color: Colors.blue.shade800,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      SwitchListTile.adaptive(
+                        title: const Text('开启后端代理 (解决网页版跨域)'),
+                        subtitle: const Text('启用后，WebDAV请求将通过后端服务中转，避免浏览器同源策略限制'),
+                        value: webDavConfig.proxyEnabled,
+                        onChanged: (value) async {
+                          await ref.read(webDavConfigProvider.notifier).setProxyEnabled(value);
+                          if (mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text(value ? '已启用后端代理' : '已禁用后端代理'),
+                                duration: const Duration(seconds: 2),
+                              ),
+                            );
+                          }
+                        },
+                        contentPadding: EdgeInsets.zero,
+                        dense: true,
+                      ),
+                      const SizedBox(height: 4),
+                      Padding(
+                        padding: const EdgeInsets.only(left: 16.0),
+                        child: Text(
+                          '当前后端地址: ${ApiService.baseUrl}',
+                          style: TextStyle(fontSize: 12, color: Colors.blueGrey.shade700),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+            
             const SizedBox(height: 16),
             TextFormField(
               controller: _urlCtrl,
@@ -671,6 +1162,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             children: [
               // ===== 后端服务器配置（仅 Web 端显示） =====
               if (kIsWeb) _buildBackendConfigCard(),
+
+              // ===== 日志配置 =====
+              _buildLogSettingsCard(),
 
               // ===== PDF 字体配置 =====
               _buildFontSettingsCard(context, settings),
