@@ -14,6 +14,7 @@ import '../services/font_manager.dart';
 import '../database/database.dart';
 import '../utils/logger.dart';
 import '../models/sync_models.dart';
+import '../utils/dialog_helper.dart';
 
 class SettingsScreen extends ConsumerStatefulWidget {
   const SettingsScreen({super.key});
@@ -141,23 +142,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       AppLogger.setLogLevel(_selectedLogLevel);
       
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('日志级别已设置为: ${_selectedLogLevel.name.toUpperCase()}'),
-            duration: const Duration(seconds: 3),
-          ),
-        );
+        DialogHelper.showSuccessSnackBar(context, '日志级别已设置为: ${_selectedLogLevel.name.toUpperCase()}');
       }
     } catch (e) {
       AppLogger.error(logPrefixSettings, '保存日志级别失败: $e');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('保存日志级别失败: $e'),
-            backgroundColor: Colors.red,
-            duration: const Duration(seconds: 3),
-          ),
-        );
+        DialogHelper.showErrorSnackBar(context, '保存日志级别失败: $e');
       }
     } finally {
       if (mounted) {
@@ -279,9 +269,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     try {
       await ApiService.saveBaseUrl(url);
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('后端服务地址已保存')),
-        );
+        DialogHelper.showSuccessSnackBar(context, '后端服务地址已保存');
         // 刷新连接状态
         await _checkBackendConnection();
       }
@@ -302,7 +290,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         _pwdCtrl.text.trim(),
       );
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('配置已保存')));
+        DialogHelper.showSuccessSnackBar(context, '配置已保存');
       }
     }
   }
@@ -352,7 +340,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       AppLogger.info(logPrefixSettings, 'WebDAV 上传成功');
       print('SETTINGS DEBUG: WebDAV 上传成功'); // 调试输出
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('推送(上传)成功！')));
+        DialogHelper.showSuccessSnackBar(context, '推送(上传)成功！');
       }
     } catch (e, st) {
       // 显示更详细的错误信息
@@ -363,7 +351,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       print('🎯 SETTINGS ERROR TYPE: ${e.runtimeType}');
       print('🎯 SETTINGS ERROR STACK: $st');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('云端备份失败: $errorStr')));
+        DialogHelper.showErrorSnackBar(context, '云端备份失败: $errorStr');
       }
     } finally {
       if (mounted) setState(() => _isSyncing = false);
@@ -373,8 +361,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
   Future<void> _pull() async {
     if (!ref.read(webDavConfigProvider).isValid) {
-       AppLogger.warning(logPrefixSettings, 'WebDAV 未配置');
-       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('请先配置并保存 WebDAV')));
+AppLogger.warning(logPrefixSettings, 'WebDAV 未配置');
+        DialogHelper.showWarningSnackBar(context, '请先配置并保存 WebDAV');
        return;
     }
     setState(() => _isSyncing = true);
@@ -390,7 +378,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       
       AppLogger.info(logPrefixSettings, '拉取下载並合并成功');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('拉取(下载)并合并成功！')));
+        DialogHelper.showSuccessSnackBar(context, '拉取(下载)并合并成功！');
       }
     } catch (e, st) {
       // 显示更详细的错误信息
@@ -401,7 +389,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       print('🎯 SETTINGS ERROR TYPE: ${e.runtimeType}');
       print('🎯 SETTINGS ERROR STACK: $st');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('云端备份下载失败: $errorStr')));
+        DialogHelper.showErrorSnackBar(context, '云端备份下载失败: $errorStr');
       }
     } finally {
       if (mounted) setState(() => _isSyncing = false);
@@ -738,13 +726,23 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             const Divider(),
             ListTile(
               title: const Text('主要字体 (中文)'),
-              subtitle: Text(settings.chineseFontId),
+              subtitle: FutureBuilder<String>(
+                future: _getFontName(settings.chineseFontId),
+                builder: (context, snapshot) {
+                  return Text(snapshot.data ?? settings.chineseFontId);
+                },
+              ),
               trailing: const Icon(Icons.edit),
               onTap: () => _showFontPicker(context, true),
             ),
             ListTile(
               title: const Text('次要字体 (英文/数字)'),
-              subtitle: Text(settings.englishFontId),
+              subtitle: FutureBuilder<String>(
+                future: _getFontName(settings.englishFontId),
+                builder: (context, snapshot) {
+                  return Text(snapshot.data ?? settings.englishFontId);
+                },
+              ),
               trailing: const Icon(Icons.edit),
               onTap: () => _showFontPicker(context, false),
             ),
@@ -757,65 +755,86 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   Future<void> _showFontPicker(BuildContext context, bool isChinese) async {
     final curId = isChinese ? ref.read(settingsProvider).chineseFontId : ref.read(settingsProvider).englishFontId;
     if (!mounted) return;
-    // ignore: use_build_context_synchronously
-    final result = await showDialog<String>(
+    
+    // 加载本地字体列表
+    final localFonts = await FontManager.getLocalFonts();
+    
+    DialogHelper.showCustomDialog<String>(
       context: context,
-      builder: (ctx) {
-        return SimpleDialog(
-          title: Text(isChinese ? '选择中文字体' : '选择英文字体'),
-          children: [
-            _buildFontOption(ctx, 'preset_noto_sans_sc_regular', 'Noto Sans SC (常规)', curId),
-            _buildFontOption(ctx, 'preset_noto_sans_sc_bold', 'Noto Sans SC (加粗)', curId),
-            _buildFontOption(ctx, 'preset_roboto_regular', 'Roboto (常规)', curId),
-            const Divider(),
-            ListTile(
-              leading: const Icon(Icons.folder_open),
-              title: const Text('从本地导入 .ttf 字体...'),
-              onTap: () => Navigator.pop(ctx, 'pick_custom'),
-            ),
-          ],
-        );
-      }
-    );
-
-    if (result != null) {
-      if (result == 'pick_custom') {
-        final customId = await FontManager.pickAndSaveCustomFont();
-        if (customId != null) {
-          if (isChinese) {
-            await ref.read(settingsProvider.notifier).setChineseFont(customId);
-          } else {
-            await ref.read(settingsProvider.notifier).setEnglishFont(customId);
-          }
-          if (!mounted) return;
-          // ignore: use_build_context_synchronously
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('已导入并应用自定义字体')));
-        }
-      } else {
-        // 选择的是预设字体
-        bool hasFont = await FontManager.hasFont(result);
-        if (!hasFont) {
-          if (!mounted) return;
-          // ignore: use_build_context_synchronously
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('开始下载预设字体，此过程可能需要几秒钟...')));
-          final success = await FontManager.downloadAndSavePresetFont(result);
-          if (!success) {
-            if (!mounted) return;
-            // ignore: use_build_context_synchronously
-            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('字体下载失败')));
-            return;
-          }
-        }
+      title: isChinese ? '选择中文字体' : '选择英文字体',
+      content: SizedBox(
+        width: double.maxFinite,
+        child: StatefulBuilder(
+          builder: (ctx, setState) {
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // 默认系统字体选项
+                _buildFontOption(ctx, FontManager.defaultFontId, FontManager.getFontName(FontManager.defaultFontId), curId),
+                
+                if (localFonts.isNotEmpty) ...[
+                  const Divider(height: 20),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.font_download, size: 16, color: Colors.grey),
+                        const SizedBox(width: 8),
+                        Text(
+                          '本地字体 (${localFonts.length})',
+                          style: const TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w500,
+                            color: Colors.grey,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  ...localFonts.map((font) => 
+                    _buildFontOption(ctx, font.id, font.name, curId)
+                  ).toList(),
+                ],
+                
+                const Divider(height: 20),
+                ListTile(
+                  leading: const Icon(Icons.add_circle_outline),
+                  title: const Text('添加本地字体文件...'),
+                  subtitle: const Text('支持 .ttf 和 .otf 格式'),
+                  onTap: () async {
+                    Navigator.pop(context);
+                    await _importLocalFonts(isChinese);
+                  },
+                ),
+                
+                if (localFonts.isNotEmpty) ...[
+                  ListTile(
+                    leading: const Icon(Icons.delete_outline, color: Colors.red),
+                    title: const Text('管理本地字体...'),
+                    subtitle: const Text('查看或删除已添加的字体'),
+                    onTap: () async {
+                      Navigator.pop(context);
+                      await _manageLocalFonts(isChinese);
+                    },
+                  ),
+                ],
+              ],
+            );
+          },
+        ),
+      ),
+    ).then((selectedId) async {
+      if (selectedId != null && selectedId.isNotEmpty) {
         if (isChinese) {
-          await ref.read(settingsProvider.notifier).setChineseFont(result);
+          await ref.read(settingsProvider.notifier).setChineseFont(selectedId);
         } else {
-          await ref.read(settingsProvider.notifier).setEnglishFont(result);
+          await ref.read(settingsProvider.notifier).setEnglishFont(selectedId);
         }
-        if (!mounted) return;
-        // ignore: use_build_context_synchronously
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('已应用字体')));
+        if (mounted) {
+          DialogHelper.showSuccessSnackBar(context, '已应用字体: ${FontManager.getFontName(selectedId)}');
+        }
       }
-    }
+    });
   }
 
   Widget _buildFontOption(BuildContext ctx, String id, String name, String curId) {
@@ -823,24 +842,97 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       leading: Icon(curId == id ? Icons.check_circle : Icons.circle_outlined, 
                color: curId == id ? Colors.green : Colors.grey),
       title: Text(name),
+      subtitle: id == FontManager.defaultFontId ? const Text('系统默认字体') : null,
       onTap: () => Navigator.pop(ctx, id),
     );
   }
+  
+  /// 导入本地字体文件
+  Future<void> _importLocalFonts(bool isChinese) async {
+    final fontIds = await FontManager.pickAndSaveCustomFonts();
+    
+    if (fontIds.isNotEmpty) {
+      if (mounted) {
+        DialogHelper.showSuccessSnackBar(context, '已导入 ${fontIds.length} 个字体文件');
+      }
+      // 导入完成后重新显示选择器
+      await Future.delayed(const Duration(milliseconds: 500));
+      if (mounted) {
+        _showFontPicker(context, isChinese);
+      }
+    }
+  }
+  
+  /// 管理本地字体
+  Future<void> _manageLocalFonts(bool isChinese) async {
+    final localFonts = await FontManager.getLocalFonts();
+    
+    if (localFonts.isEmpty) {
+      if (mounted) {
+        DialogHelper.showWarningSnackBar(context, '暂无本地字体文件');
+      }
+      return;
+    }
+    
+    final result = await DialogHelper.showCustomDialog<String>(
+      context: context,
+      title: '管理本地字体',
+      content: SizedBox(
+        width: double.maxFinite,
+        height: 300,
+        child: ListView.builder(
+          itemCount: localFonts.length,
+          itemBuilder: (context, index) {
+            final font = localFonts[index];
+            return ListTile(
+              leading: const Icon(Icons.font_download),
+              title: Text(font.name),
+              subtitle: Text('ID: ${font.id.substring(0, 8)}... • ${font.fileExtension}'),
+              trailing: IconButton(
+                icon: const Icon(Icons.delete_outline, color: Colors.red),
+                onPressed: () async {
+                  final confirmed = await DialogHelper.showConfirmDialog(
+                    context: context,
+                    title: '删除字体',
+                    content: '确定要删除字体 "${font.name}" 吗？',
+                    confirmText: '删除',
+                    isDestructive: true,
+                  );
+                  
+                  if (confirmed == true) {
+                    await FontManager.removeFont(font.id);
+                    if (mounted) {
+                      DialogHelper.showSuccessSnackBar(context, '已删除字体: ${font.name}');
+                      // 关闭对话框并重新打开
+                      Navigator.pop(context);
+                      _manageLocalFonts(isChinese);
+                    }
+                  }
+                },
+              ),
+            );
+          },
+        ),
+      ),
+    );
+    
+    // 管理完成后重新显示字体选择器
+    if (mounted) {
+      _showFontPicker(context, isChinese);
+    }
+  }
 
   Future<String?> _askConflict(String entityType, String entityName) async {
-    return showDialog<String>(
+    return DialogHelper.showCustomDialog<String>(
       context: context,
-      barrierDismissible: false,
-      builder: (ctx) => AlertDialog(
-        title: Text('发现冲突'),
-        content: Text('检测到本地已存在 $entityType: "$entityName"。\n请选择如何处理：'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, 'skip'), child: const Text('跳过')),
-          TextButton(onPressed: () => Navigator.pop(ctx, 'skip_all'), child: const Text('全部跳过')),
-          TextButton(onPressed: () => Navigator.pop(ctx, 'overwrite'), child: const Text('覆盖本地')),
-          TextButton(onPressed: () => Navigator.pop(ctx, 'overwrite_all'), child: const Text('全部覆盖')),
-        ],
-      ),
+      title: '发现冲突',
+      content: Text('检测到本地已存在 $entityType: "$entityName"。\n请选择如何处理：'),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context, 'skip'), child: const Text('跳过')),
+        TextButton(onPressed: () => Navigator.pop(context, 'skip_all'), child: const Text('全部跳过')),
+        TextButton(onPressed: () => Navigator.pop(context, 'overwrite'), child: const Text('覆盖本地')),
+        TextButton(onPressed: () => Navigator.pop(context, 'overwrite_all'), child: const Text('全部覆盖')),
+      ],
     );
   }
 
@@ -864,58 +956,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             const SizedBox(height: 8),
             const Text('Python 后端服务默认运行在 http://localhost:9876，数据将存储在后端服务器上。', 
               style: TextStyle(color: Colors.grey, fontSize: 13)),
-            const SizedBox(height: 16),
-            // 后端连接状态
-            Container(
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-color: _isBackendConnected ? const Color.fromRGBO(76, 175, 80, 0.1) : const Color.fromRGBO(244, 67, 54, 0.1),
-                 borderRadius: BorderRadius.circular(8),
-                 border: Border.all(
-                   color: _isBackendConnected ? const Color.fromRGBO(76, 175, 80, 0.3) : const Color.fromRGBO(244, 67, 54, 0.3),
-                 ),
-              ),
-              child: Row(
-                children: [
-                  Icon(
-                    _isCheckingBackend ? Icons.sync : (_isBackendConnected ? Icons.check_circle : Icons.error),
-                    color: _isCheckingBackend ? Colors.orange : (_isBackendConnected ? Colors.green : Colors.red),
-                    size: 20,
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          _isCheckingBackend ? '正在检查连接...' :
-                          (_isBackendConnected ? '后端服务已连接' : '后端服务未连接'),
-                          style: TextStyle(
-                            fontWeight: FontWeight.w500,
-                            color: _isCheckingBackend ? Colors.orange : (_isBackendConnected ? Colors.green : Colors.red),
-                          ),
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          _isBackendConnected 
-                              ? '服务地址: ${ApiService.baseUrl}' 
-                              : '请确保后端服务正在运行',
-                          style: const TextStyle(fontSize: 12, color: Colors.grey),
-                        ),
-                      ],
-                    ),
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.refresh),
-                    onPressed: _isCheckingBackend ? null : _checkBackendConnection,
-                    tooltip: '刷新连接状态',
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 16),
-            const Divider(),
-            const SizedBox(height: 8),
+
             // 后端服务地址配置
             Row(
               children: [
@@ -944,6 +985,55 @@ color: _isBackendConnected ? const Color.fromRGBO(76, 175, 80, 0.1) : const Colo
                 ElevatedButton(
                   onPressed: _saveBackendUrl,
                   child: const Text('保存'),
+                ),
+                const SizedBox(width: 8),
+                // 连接状态指示器
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: _isBackendConnected ? Colors.green.shade50 : Colors.red.shade50,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(
+                      color: _isBackendConnected ? Colors.green.shade200 : Colors.red.shade200,
+                      width: 1,
+                    ),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        _isCheckingBackend 
+                            ? Icons.sync 
+                            : (_isBackendConnected ? Icons.check_circle : Icons.error),
+                        size: 16,
+                        color: _isCheckingBackend 
+                            ? Colors.orange 
+                            : (_isBackendConnected ? Colors.green : Colors.red),
+                      ),
+                      const SizedBox(width: 6),
+                      Text(
+                        _isCheckingBackend 
+                            ? '检查中' 
+                            : (_isBackendConnected ? '已连接' : '未连接'),
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w500,
+                          color: _isCheckingBackend 
+                              ? Colors.orange 
+                              : (_isBackendConnected ? Colors.green : Colors.red),
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      if (!_isCheckingBackend)
+                        IconButton(
+                          icon: const Icon(Icons.refresh, size: 16),
+                          onPressed: _checkBackendConnection,
+                          tooltip: '刷新连接状态',
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints(minWidth: 24, minHeight: 24),
+                        ),
+                    ],
+                  ),
                 ),
               ],
             ),
@@ -1052,12 +1142,7 @@ color: _isBackendConnected ? const Color.fromRGBO(76, 175, 80, 0.1) : const Colo
                         onChanged: (value) async {
                           await ref.read(webDavConfigProvider.notifier).setProxyEnabled(value);
                           if (mounted) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(
-                                content: Text(value ? '已启用后端代理' : '已禁用后端代理'),
-                                duration: const Duration(seconds: 2),
-                              ),
-                            );
+DialogHelper.showSuccessSnackBar(context, value ? '已启用后端代理' : '已禁用后端代理');
                           }
                         },
                         contentPadding: EdgeInsets.zero,
@@ -1176,5 +1261,11 @@ color: _isBackendConnected ? const Color.fromRGBO(76, 175, 80, 0.1) : const Colo
         ),
       ),
     );
+  }
+  
+  /// 获取字体名称
+  Future<String> _getFontName(String fontId) async {
+    await FontManager.getLocalFonts(); // 确保字体列表已加载
+    return FontManager.getFontName(fontId);
   }
 }

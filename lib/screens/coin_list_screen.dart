@@ -16,6 +16,7 @@ import '../utils/pdf_helper.dart';
 import '../services/sync_service.dart';
 import '../providers/sync_providers.dart';
 import '../models/sync_models.dart';
+import '../utils/dialog_helper.dart';
 
 
 class CoinListScreen extends ConsumerStatefulWidget {
@@ -830,39 +831,40 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
     if (!context.mounted) return;
 
     final selectedSeriesIds = <String>{};
-    final result = await showDialog<bool>(
+    final result = await DialogHelper.showCustomDialog<bool>(
       context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setDialogState) => AlertDialog(
-          title: const Text('添加到系列'),
-          content: SizedBox(
-            width: double.maxFinite,
-            child: ListView(
-              shrinkWrap: true,
-              children: series.map((s) => CheckboxListTile(
-                title: Text(s.name),
-                value: selectedSeriesIds.contains(s.id),
-                onChanged: (val) {
-                  setDialogState(() {
-                    if (val == true) {
-                      selectedSeriesIds.add(s.id);
-                    } else {
-                      selectedSeriesIds.remove(s.id);
-                    }
-                  });
-                },
-              )).toList(),
-            ),
+      title: '添加到系列',
+      content: SizedBox(
+        width: double.maxFinite,
+        child: StatefulBuilder(
+          builder: (ctx, setDialogState) => ListView(
+            shrinkWrap: true,
+            children: series.map((s) => CheckboxListTile(
+              title: Text(s.name),
+              value: selectedSeriesIds.contains(s.id),
+              onChanged: (val) {
+                setDialogState(() {
+                  if (val == true) {
+                    selectedSeriesIds.add(s.id);
+                  } else {
+                    selectedSeriesIds.remove(s.id);
+                  }
+                });
+              },
+            )).toList(),
           ),
-          actions: [
-            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('取消')),
-            FilledButton(
-              onPressed: () => Navigator.pop(ctx, true),
-              child: const Text('确认添加'),
-            ),
-          ],
         ),
       ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context, false),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(context, true),
+          child: const Text('确认添加'),
+        ),
+      ],
     );
 
     if (result == true && selectedSeriesIds.isNotEmpty) {
@@ -872,9 +874,7 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
       );
       if (mounted) {
         final currentContext = context;
-        ScaffoldMessenger.of(currentContext).showSnackBar(
-          SnackBar(content: Text('已将 ${_selectedCoinIds.length} 枚纪念币添加到 ${selectedSeriesIds.length} 个系列')),
-        );
+        DialogHelper.showSuccessSnackBar(currentContext, '已将 ${_selectedCoinIds.length} 枚纪念币添加到 ${selectedSeriesIds.length} 个系列');
         setState(() {
           _isSelectionMode = false;
           _selectedCoinIds.clear();
@@ -886,29 +886,19 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
   /// 确认从所有系列移除
   Future<void> _confirmRemoveFromAllSeries(BuildContext context, WidgetRef ref) async {
     if (_selectedCoinIds.isEmpty) return;
-    final confirmed = await showDialog<bool>(
+    final confirmed = await DialogHelper.showConfirmDialog(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('从所有系列移除'),
-        content: Text('确定要将选中的 ${_selectedCoinIds.length} 枚纪念币从所有系列中移除吗？纪念币本身不会被删除。'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('取消')),
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            style: FilledButton.styleFrom(backgroundColor: Colors.orange),
-            child: const Text('确认移除'),
-          ),
-        ],
-      ),
+      title: '从所有系列移除',
+      content: '确定要将选中的 ${_selectedCoinIds.length} 枚纪念币从所有系列中移除吗？纪念币本身不会被删除。',
+      confirmText: '确认移除',
+      isDestructive: true,
     );
 
     if (confirmed == true) {
       await ref.read(coinRepositoryProvider).removeCoinsFromAllSeries(_selectedCoinIds.toList());
       if (mounted) {
         final currentContext = context;
-        ScaffoldMessenger.of(currentContext).showSnackBar(
-          SnackBar(content: Text('已将 ${_selectedCoinIds.length} 枚纪念币从所有系列中移除')),
-        );
+        DialogHelper.showSuccessSnackBar(currentContext, '已将 ${_selectedCoinIds.length} 枚纪念币从所有系列中移除');
         setState(() {
           _isSelectionMode = false;
           _selectedCoinIds.clear();
@@ -984,9 +974,9 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
   Future<void> _exportSelectedCoins(BuildContext context, WidgetRef ref) async {
     if (_selectedCoinIds.isEmpty) return;
     
-    final messenger = ScaffoldMessenger.of(context);
+    ScaffoldFeatureController<SnackBar, SnackBarClosedReason>? progressController;
     try {
-      messenger.showSnackBar(const SnackBar(content: Text('正在打包...')));
+      progressController = DialogHelper.showProgressSnackBar(context, '正在打包...');
       
       final repo = ref.read(coinRepositoryProvider);
       final allCoins = await repo.getAllCoins();
@@ -1026,7 +1016,11 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
       
       await exportFileAndShare(zipBytes, 'export.ccm');
       
+      // 关闭进度条
+      progressController.close();
+      
       if (mounted) {
+        DialogHelper.showSuccessSnackBar(context, '导出成功，文件已保存');
         setState(() {
           _isSelectionMode = false;
           _selectedCoinIds.clear();
@@ -1035,7 +1029,11 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
       
     } catch (e) {
       debugPrint(e.toString());
-      messenger.showSnackBar(SnackBar(content: Text('导出失败: $e')));
+      // 关闭进度条
+      if (progressController != null) {
+        ScaffoldMessenger.of(context).hideCurrentSnackBar();
+      }
+      DialogHelper.showErrorSnackBar(context, '导出失败: $e');
     }
   }
 
@@ -1043,39 +1041,33 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
   void _showCloudSyncMenu() {
     final config = ref.read(webDavConfigProvider);
     if (!config.isValid) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('请先在设置中配置 WebDAV 同步')),
-      );
+      DialogHelper.showWarningSnackBar(context, '请先在设置中配置 WebDAV 同步');
       return;
     }
-    showModalBottomSheet(
+    DialogHelper.showBottomMenu(
       context: context,
-      builder: (ctx) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              leading: const Icon(Icons.cloud_upload),
-              title: const Text('云端备份 (Push)'),
-              subtitle: const Text('将本地数据上传到云端'),
-              onTap: () {
-                Navigator.pop(ctx);
-                _pushToCloud();
-              },
-            ),
-            const Divider(height: 1),
-            ListTile(
-              leading: const Icon(Icons.cloud_download),
-              title: const Text('拉取合并 (Pull)'),
-              subtitle: const Text('从云端下载并合并到本地'),
-              onTap: () {
-                Navigator.pop(ctx);
-                _pullFromCloud();
-              },
-            ),
-          ],
+      title: '云同步操作',
+      items: [
+        DialogHelper.menuItem(
+          icon: Icons.cloud_upload,
+          title: '云端备份 (Push)',
+          subtitle: '将本地数据上传到云端',
+          onTap: () {
+            Navigator.pop(context);
+            _pushToCloud();
+          },
         ),
-      ),
+        const Divider(),
+        DialogHelper.menuItem(
+          icon: Icons.cloud_download,
+          title: '拉取合并 (Pull)',
+          subtitle: '从云端下载并合并到本地',
+          onTap: () {
+            Navigator.pop(context);
+            _pullFromCloud();
+          },
+        ),
+      ],
     );
   }
 
@@ -1083,7 +1075,7 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
 Future<void> _pushToCloud() async {
     if (!ref.read(webDavConfigProvider).isValid) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('请先配置 WebDAV')));
+        DialogHelper.showWarningSnackBar(context, '请先配置 WebDAV');
       }
       return;
     }
@@ -1116,11 +1108,11 @@ Future<void> _pushToCloud() async {
       
       await service.pushBackup(series, coins, links, coinImages, seriesImageList);
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('云端备份成功！')));
+        DialogHelper.showSuccessSnackBar(context, '云端备份成功！');
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('云端备份失败: $e')));
+        DialogHelper.showErrorSnackBar(context, '云端备份失败: $e');
       }
     } finally {
       if (mounted) setState(() => _isSyncing = false);
@@ -1131,7 +1123,7 @@ Future<void> _pushToCloud() async {
 Future<void> _pullFromCloud() async {
     if (!ref.read(webDavConfigProvider).isValid) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('请先配置 WebDAV')));
+        DialogHelper.showWarningSnackBar(context, '请先配置 WebDAV');
       }
       return;
     }
@@ -1144,11 +1136,11 @@ Future<void> _pullFromCloud() async {
         await _mergeCloudData(data);
       }
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('拉取合并成功！')));
+        DialogHelper.showSuccessSnackBar(context, '拉取合并成功！');
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('拉取合并失败: $e')));
+        DialogHelper.showErrorSnackBar(context, '拉取合并失败: $e');
       }
     } finally {
       if (mounted) setState(() => _isSyncing = false);
@@ -1266,40 +1258,30 @@ Future<void> _pullFromCloud() async {
   }
 
   Future<String?> _askConflict(String entityType, String entityName) async {
-    return showDialog<String>(
+    return DialogHelper.showCustomDialog<String>(
       context: context,
-      barrierDismissible: false,
-      builder: (ctx) => AlertDialog(
-        title: const Text('发现冲突'),
-        content: Text('检测到本地已存在 $entityType: "$entityName"。\n请选择如何处理：'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, 'skip'), child: const Text('跳过')),
-          TextButton(onPressed: () => Navigator.pop(ctx, 'skip_all'), child: const Text('全部跳过')),
-          TextButton(onPressed: () => Navigator.pop(ctx, 'overwrite'), child: const Text('覆盖本地')),
-          TextButton(onPressed: () => Navigator.pop(ctx, 'overwrite_all'), child: const Text('全部覆盖')),
-        ],
-      ),
+      title: '发现冲突',
+      content: Text('检测到本地已存在 $entityType: "$entityName"。\n请选择如何处理：'),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context, 'skip'), child: const Text('跳过')),
+        TextButton(onPressed: () => Navigator.pop(context, 'skip_all'), child: const Text('全部跳过')),
+        TextButton(onPressed: () => Navigator.pop(context, 'overwrite'), child: const Text('覆盖本地')),
+        TextButton(onPressed: () => Navigator.pop(context, 'overwrite_all'), child: const Text('全部覆盖')),
+      ],
     );
   }
 
   void _confirmDeleteCoin(BuildContext context, WidgetRef ref, String coinId, String coinName) {
-    showDialog(
+    DialogHelper.showConfirmDialog(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('删除确认'),
-        content: Text('确定要永久删除纪念币 "$coinName" 吗？'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
-          FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: Colors.red),
-            onPressed: () async {
-              await ref.read(coinRepositoryProvider).deleteCoin(coinId);
-              if (ctx.mounted) Navigator.pop(ctx);
-            },
-            child: const Text('删除'),
-          ),
-        ],
-      ),
-    );
+      title: '删除确认',
+      content: '确定要永久删除纪念币 "$coinName" 吗？',
+      confirmText: '删除',
+      isDestructive: true,
+    ).then((confirmed) async {
+      if (confirmed == true) {
+        await ref.read(coinRepositoryProvider).deleteCoin(coinId);
+      }
+    });
   }
 }
