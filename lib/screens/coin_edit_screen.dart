@@ -9,6 +9,7 @@ import '../providers/coin_providers.dart';
 import '../services/image_service.dart';
 import '../widgets/coin_image_widget.dart';
 import '../utils/logger.dart';
+import '../utils/dialog_helper.dart';
 
 class CoinEditScreen extends ConsumerStatefulWidget {
   final String? seriesId;
@@ -205,6 +206,12 @@ class _CoinEditScreenState extends ConsumerState<CoinEditScreen> {
       appBar: AppBar(
         title: Text(widget.coin != null ? '纪念币详情' : '添加纪念币'),
         actions: [
+          if (widget.coin != null)
+            IconButton(
+              icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
+              onPressed: () => _confirmDeleteCoin(context, ref),
+              tooltip: '删除纪念币',
+            ),
           IconButton(icon: const Icon(Icons.check), onPressed: _save),
         ],
       ),
@@ -232,9 +239,13 @@ class _CoinEditScreenState extends ConsumerState<CoinEditScreen> {
                           children: [
                             CoinImageWidget(
                               imagePath: _imagePaths.isNotEmpty ? _imagePaths.first : null,
-                              imageBytes: _imagePaths.isNotEmpty ? _imageBytesMap[_imagePaths.first] : null,  // 传递第一张图片的字节数据
+                              imageBytes: _imagePaths.isNotEmpty ? _imageBytesMap[_imagePaths.first] : null,
                               width: 160,
                               height: 160,
+                              enablePreview: _imagePaths.isNotEmpty,
+                              previewTitle: _nameCtrl.text.isNotEmpty ? _nameCtrl.text : '图片预览',
+                              imagePaths: _imagePaths,
+                              imageBytesMap: _imageBytesMap,
                             ),
                             Container(
                               width: 160, height: 160,
@@ -261,7 +272,7 @@ class _CoinEditScreenState extends ConsumerState<CoinEditScreen> {
               ),
               if (_imagePaths.isNotEmpty)
                 SizedBox(
-                  height: 130,
+                  height: 180,
                   child: ListView.separated(
                     scrollDirection: Axis.horizontal,
                     itemCount: _imagePaths.length,
@@ -283,9 +294,14 @@ class _CoinEditScreenState extends ConsumerState<CoinEditScreen> {
                                   borderRadius: BorderRadius.circular(6),
                                   child: CoinImageWidget(
                                     imagePath: path,
-                                    imageBytes: _imageBytesMap[path],  // 传递对应的字节数据
-                                    width: 108,
-                                    height: 72,
+                                    imageBytes: _imageBytesMap[path],
+                                    width: 160,
+                                    height: 120,
+                                    fit: BoxFit.cover,
+                                    enablePreview: true,
+                                    previewTitle: _nameCtrl.text.isNotEmpty ? _nameCtrl.text : '图片预览',
+                                    imagePaths: _imagePaths,
+                                    imageBytesMap: _imageBytesMap,
                                   ),
                                 ),
                               ),
@@ -573,5 +589,39 @@ class _CoinEditScreenState extends ConsumerState<CoinEditScreen> {
         ),
       ),
     );
+  }
+
+  Future<void> _confirmDeleteCoin(BuildContext context, WidgetRef ref) async {
+    final coin = widget.coin;
+    if (coin == null) return;
+    
+    final BuildContext dialogContext = context;
+    
+    final confirmed = await DialogHelper.showConfirmDialog(
+      context: dialogContext,
+      title: '删除确认',
+      content: '确定要永久删除纪念币 "${coin.name}" 吗？此操作不可撤销。',
+      confirmText: '删除',
+      isDestructive: true,
+    );
+    
+    if (confirmed == true) {
+      try {
+        await ref.read(coinRepositoryProvider).deleteCoin(coin.id);
+        if (mounted) {
+          Navigator.pop(dialogContext);
+        }
+      } catch (e, stack) {
+        AppLogger.error(logPrefixUI, '删除纪念币失败: $e\n$stack');
+        if (mounted) {
+          ScaffoldMessenger.of(dialogContext).showSnackBar(
+            SnackBar(
+              content: Text('删除失败: $e'),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+      }
+    }
   }
 }

@@ -27,7 +27,7 @@ class ApiService {
       }
     } catch (e) {
       // 如果加载失败，使用默认值
-      print('Failed to load saved backend URL: $e');
+      // print('Failed to load saved backend URL: $e');
     }
   }
 
@@ -38,7 +38,7 @@ class ApiService {
       await prefs.setString(_backendUrlKey, url);
       setBaseUrl(url);
     } catch (e) {
-      print('Failed to save backend URL: $e');
+      // print('Failed to save backend URL: $e');
       rethrow;
     }
   }
@@ -252,9 +252,29 @@ class ApiService {
     return '$_baseUrl/api/images/file/$imagePath';
   }
 
+  /// 获取缩略图 URL（后端按尺寸缩放并缓存，用于列表/网格展示）
+  static String getThumbnailUrl(String imagePath, {int? width, int? height}) {
+    final params = <String>[];
+    if (width != null) params.add('width=$width');
+    if (height != null) params.add('height=$height');
+    if (params.isEmpty) return getImageUrl(imagePath);
+    return '$_baseUrl/api/images/file/$imagePath?${params.join('&')}';
+  }
+
   // ==========================================
   // Fonts API
   // ==========================================
+
+  /// 获取所有可用字体列表
+  static Future<List<Map<String, dynamic>>> getFontsList() async {
+    try {
+      final result = await _get('/fonts/');
+      final fonts = result['fonts'] as List;
+      return fonts.cast<Map<String, dynamic>>();
+    } catch (_) {
+      return [];
+    }
+  }
 
   static Future<String> uploadFont(Uint8List bytes, String filename) async {
     final request = http.MultipartRequest('POST', Uri.parse('$apiUrl/fonts/upload'));
@@ -268,8 +288,14 @@ class ApiService {
     throw ApiException(response.statusCode, response.body);
   }
 
+  /// 获取字体文件的直接URL（用于动态加载）
   static String getFontUrl(String fontId) {
     return '$_baseUrl/api/fonts/$fontId';
+  }
+
+  /// 获取静态字体文件URL（用于CSS加载）
+  static String getStaticFontUrl(String fontId, String ext) {
+    return '$_baseUrl/fonts/$fontId$ext';
   }
 
   static Future<bool> checkFontExists(String fontId) async {
@@ -283,6 +309,25 @@ class ApiService {
 
   static Future<void> deleteFont(String fontId) async {
     await _delete('/fonts/$fontId');
+  }
+
+  // ==========================================
+  // Application Settings API
+  // ==========================================
+
+  /// 获取应用程序设置
+  static Future<Map<String, dynamic>> getAppSettings() async {
+    return await _get('/settings');
+  }
+
+  /// 更新应用程序设置
+  static Future<Map<String, dynamic>> updateAppSettings(Map<String, dynamic> settings) async {
+    return await _put('/settings', settings);
+  }
+
+  /// 更新特定类别的设置
+  static Future<Map<String, dynamic>> updateSettingsCategory(String category, Map<String, dynamic> settings) async {
+    return await _put('/settings/$category', settings);
   }
 
   // ==========================================

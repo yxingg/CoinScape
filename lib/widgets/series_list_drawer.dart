@@ -5,6 +5,7 @@ import '../providers/ui_providers.dart';
 import '../database/database.dart';
 import '../screens/series_edit_screen.dart';
 import '../widgets/coin_image_widget.dart';
+import '../widgets/global_image_viewer.dart';
 import '../utils/export_helper.dart';
 import '../utils/pdf_helper.dart';
 import '../providers/settings_provider.dart';
@@ -23,6 +24,20 @@ class SeriesListDrawer extends ConsumerStatefulWidget {
 class _SeriesListDrawerState extends ConsumerState<SeriesListDrawer> {
   bool _isSelectionMode = false;
   final Set<String> _selectedSeriesIds = {};
+
+  Future<void> _showSeriesImages(SeriesData series) async {
+    final repo = ref.read(coinRepositoryProvider);
+    final images = await repo.getSeriesImages(series.id);
+    if (!mounted) return;
+    final paths = images.map((e) => e.imagePath).toList();
+    if (paths.isEmpty) return;
+    if (!mounted) return;
+    GlobalImageViewer.show(
+      context,
+      imagePaths: paths,
+      title: series.name,
+    );
+  }
 
   void _showAddOrEditDialog(BuildContext context, [SeriesData? series]) {
     Navigator.push(
@@ -97,39 +112,15 @@ class _SeriesListDrawerState extends ConsumerState<SeriesListDrawer> {
     );
   }
 
-  void _showContextMenu(BuildContext context, Offset position, SeriesData series) {
-    showMenu(
-      context: context,
-      position: RelativeRect.fromLTRB(position.dx, position.dy, position.dx, position.dy),
-      items: [
-        const PopupMenuItem(value: 'edit', child: Text('编辑系列')),
-        const PopupMenuItem(value: 'delete', child: Text('删除系列')),
-        const PopupMenuItem(value: 'select', child: Text('多选')),
-      ],
-    ).then((value) {
-      if (!context.mounted) return;
-      if (value == 'edit') {
-        _showAddOrEditDialog(context, series);
-      } else if (value == 'delete') {
-        _showDeleteConfirm(context, series);
-      } else if (value == 'select') {
-        setState(() {
-          _isSelectionMode = true;
-          _selectedSeriesIds.add(series.id);
-        });
-      }
-    });
-  }
-
   Future<void> _generatePdfForSelectedSeries() async {
     if (_selectedSeriesIds.isEmpty) return;
     final repo = ref.read(coinRepositoryProvider);
     final allSeries = await repo.getAllSeries();
-    final selectedSeries = allSeries.where((s) => _selectedSeriesIds.contains(s.id)).toList();
+    final selectedSeriesList = allSeries.where((s) => _selectedSeriesIds.contains(s.id)).toList();
 
     final seriesSections = <PdfSeriesSection>[];
     final allPdfCoins = <Coin>[];
-    for (final s in selectedSeries) {
+    for (final s in selectedSeriesList) {
       final coins = await repo.getCoinsBySeries(s.id);
       seriesSections.add(PdfSeriesSection(title: s.name, coins: coins));
       allPdfCoins.addAll(coins);
@@ -161,16 +152,16 @@ class _SeriesListDrawerState extends ConsumerState<SeriesListDrawer> {
     try {
       messenger.showSnackBar(const SnackBar(content: Text('正在打包...')));
       final repo = ref.read(coinRepositoryProvider);
-      
+
       final allSeries = await repo.getAllSeries();
-      final selectedSeries = allSeries.where((s) => _selectedSeriesIds.contains(s.id)).toList();
-      
+      final selectedSeriesList = allSeries.where((s) => _selectedSeriesIds.contains(s.id)).toList();
+
       final selectedLinks = <CoinSeriesLinkData>[];
       final selectedCoins = <Coin>[];
       final selectedCoinImages = <CoinImage>[];
       final selectedSeriesImages = <SeriesImage>[];
-      
-      for (final s in selectedSeries) {
+
+      for (final s in selectedSeriesList) {
         final coins = await repo.getCoinsBySeries(s.id);
         selectedCoins.addAll(coins);
         for (final c in coins) {
@@ -183,7 +174,7 @@ class _SeriesListDrawerState extends ConsumerState<SeriesListDrawer> {
       }
 
       final zipBytes = await generateBackupDataBytes(
-        selectedSeries, selectedCoins, selectedLinks, selectedCoinImages, selectedSeriesImages,
+        selectedSeriesList, selectedCoins, selectedLinks, selectedCoinImages, selectedSeriesImages,
       );
       await exportFileAndShare(zipBytes, 'series_export.ccm');
       if (mounted) {
@@ -201,6 +192,7 @@ class _SeriesListDrawerState extends ConsumerState<SeriesListDrawer> {
   Widget build(BuildContext context) {
     final seriesAsync = ref.watch(seriesListProvider);
     final selectedSeries = ref.watch(selectedSeriesProvider);
+    final theme = Theme.of(context);
 
     return SafeArea(
       child: Column(
@@ -211,7 +203,7 @@ class _SeriesListDrawerState extends ConsumerState<SeriesListDrawer> {
             child: Row(
               children: [
                 Icon(Icons.collections_bookmark,
-                     color: Theme.of(context).colorScheme.primary, size: 28),
+                     color: theme.colorScheme.primary, size: 28),
                 const SizedBox(width: 12),
                 Expanded(
                   child: Text(
@@ -245,11 +237,6 @@ class _SeriesListDrawerState extends ConsumerState<SeriesListDrawer> {
               child: Row(
                 children: [
                   IconButton(
-                    icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
-                    tooltip: '删除选中系列',
-                    onPressed: _showBatchDeleteConfirm,
-                  ),
-                  IconButton(
                     icon: const Icon(Icons.picture_as_pdf),
                     tooltip: '生成 PDF',
                     onPressed: _generatePdfForSelectedSeries,
@@ -263,6 +250,7 @@ class _SeriesListDrawerState extends ConsumerState<SeriesListDrawer> {
               ),
             ),
           const Divider(height: 1),
+          // 系列列表
           Expanded(
             child: seriesAsync.when(
               data: (list) {
@@ -290,71 +278,73 @@ class _SeriesListDrawerState extends ConsumerState<SeriesListDrawer> {
                     final isSelected = selectedSeries?.id == series.id;
                     final isChecked = _selectedSeriesIds.contains(series.id);
 
-                    return GestureDetector(
-                      onSecondaryTapDown: (details) => _showContextMenu(context, details.globalPosition, series),
-                      child: ListTile(
-                        selected: isSelected,
-                        selectedTileColor: Theme.of(context).colorScheme.primaryContainer.withValues(alpha: 0.6),
-                        leading: _isSelectionMode
-                            ? Checkbox(
-                                value: isChecked,
-                                onChanged: (val) {
-                                  setState(() {
-                                    if (val == true) {
-                                      _selectedSeriesIds.add(series.id);
-                                    } else {
-                                      _selectedSeriesIds.remove(series.id);
-                                    }
-                                  });
-                                },
-                              )
-                            : SizedBox(
-                                width: 44,
-                                height: 44,
-                                child: FutureBuilder<String?>(
-                                  future: ref.read(coinRepositoryProvider).getSeriesCoverImagePath(series.id),
-                                  builder: (context, snapshot) {
-                                    final path = snapshot.data;
-                                    return ClipRRect(
+                    return ListTile(
+                      selected: isSelected,
+                      selectedTileColor: theme.colorScheme.primaryContainer.withValues(alpha: 0.6),
+                      leading: _isSelectionMode
+                          ? Checkbox(
+                              value: isChecked,
+                              onChanged: (val) {
+                                setState(() {
+                                  if (val == true) {
+                                    _selectedSeriesIds.add(series.id);
+                                  } else {
+                                    _selectedSeriesIds.remove(series.id);
+                                  }
+                                });
+                              },
+                            )
+                          : SizedBox(
+                              width: 44,
+                              height: 44,
+                              child: FutureBuilder<String?>(
+                                future: ref.read(coinRepositoryProvider).getSeriesCoverImagePath(series.id),
+                                builder: (context, snapshot) {
+                                  final path = snapshot.data;
+                                  return GestureDetector(
+                                    onTap: (path != null && path.isNotEmpty)
+                                        ? () => _showSeriesImages(series)
+                                        : null,
+                                    child: ClipRRect(
                                       borderRadius: BorderRadius.circular(8),
                                       child: CoinImageWidget(
                                         imagePath: path,
                                         width: 44,
                                         height: 44,
                                       ),
-                                    );
-                                  },
-                                ),
+                                    ),
+                                  );
+                                },
                               ),
-                        title: Text(series.name, style: const TextStyle(fontWeight: FontWeight.w500)),
-                        subtitle: series.description?.isNotEmpty == true
-                            ? Text(series.description!, maxLines: 1, overflow: TextOverflow.ellipsis)
-                            : null,
-                        onTap: () {
-                          if (_isSelectionMode) {
-                            setState(() {
-                              if (isChecked) {
-                                _selectedSeriesIds.remove(series.id);
-                              } else {
-                                _selectedSeriesIds.add(series.id);
-                              }
-                            });
-                          } else {
-                            ref.read(selectedSeriesProvider.notifier).state = series;
-                            if (MediaQuery.of(context).size.width <= 600) {
-                              Navigator.of(context).pop();
-                            }
-                          }
-                        },
-                        onLongPress: () {
-                          if (!_isSelectionMode) {
-                            setState(() {
-                              _isSelectionMode = true;
+                            ),
+                      title: Text(series.name, style: const TextStyle(fontWeight: FontWeight.w500)),
+                      subtitle: series.description?.isNotEmpty == true
+                          ? Text(series.description!, maxLines: 1, overflow: TextOverflow.ellipsis)
+                          : null,
+                      onTap: () {
+                        if (_isSelectionMode) {
+                          setState(() {
+                            if (isChecked) {
+                              _selectedSeriesIds.remove(series.id);
+                            } else {
                               _selectedSeriesIds.add(series.id);
-                            });
+                            }
+                          });
+                        } else {
+                          ref.read(selectedSeriesProvider.notifier).state = series;
+                          if (MediaQuery.of(context).size.width <= 600) {
+                            Navigator.of(context).pop();
                           }
-                        },
-                      ),
+                        }
+                      },
+                      onLongPress: () {
+                        if (!_isSelectionMode) {
+                          setState(() {
+                            _isSelectionMode = true;
+                            _selectedSeriesIds.add(series.id);
+                          });
+                        }
+                      },
                     );
                   },
                 );
@@ -364,23 +354,110 @@ class _SeriesListDrawerState extends ConsumerState<SeriesListDrawer> {
             ),
           ),
           const Divider(height: 1),
-          Padding(
-            padding: const EdgeInsets.all(16.0),
-            child: Column(
+          // 底部操作按钮区域
+          _buildBottomActions(selectedSeries),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildBottomActions(SeriesData? selectedSeries) {
+    final theme = Theme.of(context);
+
+    if (_isSelectionMode) {
+      return Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          children: [
+            Row(
               children: [
-                FilledButton.icon(
-                  onPressed: () => _showAddOrEditDialog(context),
-                  icon: const Icon(Icons.add),
-                  label: const Text('添加新系列'),
-                  style: FilledButton.styleFrom(
-                    minimumSize: const Size(double.infinity, 48),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: _selectedSeriesIds.isNotEmpty ? _showBatchDeleteConfirm : null,
+                    icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
+                    label: const Text('删除选中', style: TextStyle(color: Colors.redAccent)),
+                    style: OutlinedButton.styleFrom(
+                      side: const BorderSide(color: Colors.redAccent),
+                      minimumSize: const Size(0, 44),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    ),
                   ),
                 ),
               ],
             ),
-          ),
-        ],
+            const SizedBox(height: 8),
+            FilledButton.icon(
+              onPressed: () => _showAddOrEditDialog(context),
+              icon: const Icon(Icons.add),
+              label: const Text('添加新系列'),
+              style: FilledButton.styleFrom(
+                minimumSize: const Size(double.infinity, 48),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    if (selectedSeries != null) {
+      return Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: () => _showAddOrEditDialog(context, selectedSeries),
+                    icon: Icon(Icons.edit, size: 18, color: theme.colorScheme.primary),
+                    label: Text('编辑', style: TextStyle(color: theme.colorScheme.primary)),
+                    style: OutlinedButton.styleFrom(
+                      minimumSize: const Size(0, 44),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: () => _showDeleteConfirm(context, selectedSeries),
+                    icon: const Icon(Icons.delete_outline, size: 18, color: Colors.redAccent),
+                    label: const Text('删除', style: TextStyle(color: Colors.redAccent)),
+                    style: OutlinedButton.styleFrom(
+                      side: const BorderSide(color: Colors.redAccent),
+                      minimumSize: const Size(0, 44),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            FilledButton.icon(
+              onPressed: () => _showAddOrEditDialog(context),
+              icon: const Icon(Icons.add),
+              label: const Text('添加新系列'),
+              style: FilledButton.styleFrom(
+                minimumSize: const Size(double.infinity, 48),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return Padding(
+      padding: const EdgeInsets.all(16.0),
+      child: FilledButton.icon(
+        onPressed: () => _showAddOrEditDialog(context),
+        icon: const Icon(Icons.add),
+        label: const Text('添加新系列'),
+        style: FilledButton.styleFrom(
+          minimumSize: const Size(double.infinity, 48),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        ),
       ),
     );
   }

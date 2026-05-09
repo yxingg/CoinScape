@@ -3,7 +3,9 @@ import 'package:path_provider/path_provider.dart';
 import 'package:file_picker/file_picker.dart';
 import 'dart:io' as io;
 import 'dart:convert';
+import 'package:http/http.dart' as http;
 import '../utils/logger.dart';
+import 'api_service.dart';
 
 /// 本地字体信息
 class LocalFontInfo {
@@ -47,39 +49,67 @@ class FontManager {
   // 本地字体配置文件名
   static const String _fontsConfigFileName = 'local_fonts.json';
 
-  /// 获取所有本地字体的列表
+  /// 获取所有可用字体的列表（包含后端字体）
   static Future<List<LocalFontInfo>> getLocalFonts() async {
-    if (_localFonts.isNotEmpty) return _localFonts;
-    
-    await _loadLocalFonts();
+    if (kIsWeb && _localFonts.isEmpty) {
+      await _loadServerFonts();
+    } else if (_localFonts.isEmpty) {
+      await _loadLocalFonts();
+    }
     return _localFonts;
   }
-  
-  /// 加载本地字体配置
-  static Future<void> _loadLocalFonts() async {
+
+  /// 从后端服务器加载字体列表
+  static Future<void> _loadServerFonts() async {
     try {
-      if (kIsWeb) {
-        // Web端：从内存缓存加载
-        final configBytes = _webMemoryCache[_fontsConfigFileName];
-        if (configBytes != null) {
-          final configJson = utf8.decode(configBytes);
-          final data = jsonDecode(configJson) as List<dynamic>;
-          _localFonts = data.map((item) => LocalFontInfo.fromJson(item as Map<String, dynamic>)).toList();
-        }
-      } else {
-        // 桌面/移动端：从文件加载
+      final fontsData = await ApiService.getFontsList();
+      _localFonts = fontsData.map((fontData) {
+        final filename = fontData['filename'] as String;
+        final fontId = fontData['id'] as String;
+        final name = fontId.replaceAll('_', ' ').replaceAll('custom', '自定义');
+        final ext = filename.toLowerCase().endsWith('.otf') ? 'otf' : 'ttf';
+        
+        return LocalFontInfo(
+          id: fontId,
+          name: name,
+          fileExtension: ext,
+          addedAt: DateTime.fromMillisecondsSinceEpoch((fontData['modified_at'] as num).toInt() * 1000),
+        );
+      }).toList();
+      
+      AppLogger.info(logPrefixFont, "从后端加载了 ${_localFonts.length} 个字体");
+    } catch (e) {
+      AppLogger.error(logPrefixFont, "从后端加载字体列表失败: $e");
+      _localFonts = await _loadLocalFontsFallback();
+    }
+  }
+
+  /// 加载本地字体配置（原生端备用）
+  static Future<List<LocalFontInfo>> _loadLocalFonts() async {
+    try {
+      if (!kIsWeb) {
         final dir = await getApplicationDocumentsDirectory();
         final configFile = io.File('${dir.path}/fonts/$_fontsConfigFileName');
         if (await configFile.exists()) {
           final content = await configFile.readAsString();
           final data = jsonDecode(content) as List<dynamic>;
           _localFonts = data.map((item) => LocalFontInfo.fromJson(item as Map<String, dynamic>)).toList();
+          return _localFonts;
         }
       }
     } catch (e) {
       AppLogger.error(logPrefixFont, "加载本地字体配置失败: $e");
-      _localFonts = [];
     }
+    return _localFonts = [];
+  }
+
+  /// 后备加载方案
+  static Future<List<LocalFontInfo>> _loadLocalFontsFallback() async {
+    // Web端失败时使用一个空的列表
+    if (kIsWeb) {
+      return [];
+    }
+    return await _loadLocalFonts();
   }
 
   /// 允许用户自行选择手机/电脑里的 .ttf/.otf 文件并保存
@@ -107,29 +137,45 @@ class FontManager {
         }
 
         if (bytes != null && bytes.isNotEmpty) {
-          // 使用文件名（移除扩展名）作为字体名
-          String fileName = file.name;
-          final lastDot = fileName.lastIndexOf('.');
-          if (lastDot != -1) {
-            fileName = fileName.substring(0, lastDot);
+          String fontId;
+          
+          if (kIsWeb) {
+            // Web端：上传到后端服务器
+            try {
+              fontId = await ApiService.uploadFont(bytes, file.name);
+              
+              // 重新加载字体列表以获取最新字体信息
+              await _loadServerFonts();
+            } catch (e) {
+              AppLogger.error(logPrefixFont, "字体上传到服务器失败: $e");
+              continue;
+            }
+          } else {
+            // 原生端：本地保存
+            // 使用文件名（移除扩展名）作为字体名
+            String fileName = file.name;
+            final lastDot = fileName.lastIndexOf('.');
+            if (lastDot != -1) {
+              fileName = fileName.substring(0, lastDot);
+            }
+            
+            // 生成唯一ID
+            fontId = 'custom_${DateTime.now().millisecondsSinceEpoch}_${fontIds.length}';
+            final fileExtension = file.extension ?? 'ttf';
+            
+            // 保存字体文件
+            await _saveFontFile(fontId, bytes);
+            
+            // 添加字体信息到列表
+            await _addLocalFontInfo(
+              LocalFontInfo(
+                id: fontId,
+                name: fileName,
+                fileExtension: fileExtension,
+                addedAt: DateTime.now(),
+              ),
+            );
           }
-          
-          // 生成唯一ID
-          final fontId = 'custom_${DateTime.now().millisecondsSinceEpoch}_${fontIds.length}';
-          final fileExtension = file.extension ?? 'ttf';
-          
-          // 保存字体文件
-          await _saveFontFile(fontId, bytes);
-          
-          // 添加字体信息到列表
-          await _addLocalFontInfo(
-            LocalFontInfo(
-              id: fontId,
-              name: fileName,
-              fileExtension: fileExtension,
-              addedAt: DateTime.now(),
-            ),
-          );
           
           fontIds.add(fontId);
         }
@@ -175,14 +221,28 @@ class FontManager {
   
   /// 移除字体
   static Future<void> removeFont(String fontId) async {
-    // 从列表中移除
-    _localFonts.removeWhere((font) => font.id == fontId);
-    await _saveLocalFontsConfig();
-    
-    // 删除字体文件
-    await _deleteFontFile(fontId);
-    
-    AppLogger.info(logPrefixFont, "已移除字体: $fontId");
+    if (kIsWeb) {
+      // Web端：调用后端API删除字体
+      try {
+        await ApiService.deleteFont(fontId);
+        // 从本地缓存中移除
+        _localFonts.removeWhere((font) => font.id == fontId);
+        AppLogger.info(logPrefixFont, "已从后端删除字体: $fontId");
+      } catch (e) {
+        AppLogger.error(logPrefixFont, "删除字体失败: $e");
+        rethrow;
+      }
+    } else {
+      // 原生端：本地删除
+      // 从列表中移除
+      _localFonts.removeWhere((font) => font.id == fontId);
+      await _saveLocalFontsConfig();
+      
+      // 删除字体文件
+      await _deleteFontFile(fontId);
+      
+      AppLogger.info(logPrefixFont, "已移除字体: $fontId");
+    }
   }
   
   /// 删除字体文件（内部方法）
@@ -211,7 +271,7 @@ class FontManager {
       
       if (kIsWeb) {
         // Web端：保存在内存缓存中
-        _webMemoryCache[_fontsConfigFileName] = utf8.encode(configJson) as Uint8List;
+        _webMemoryCache[_fontsConfigFileName] = Uint8List.fromList(utf8.encode(configJson));
       } else {
         final dir = await getApplicationDocumentsDirectory();
         final configFile = io.File('${dir.path}/fonts/$_fontsConfigFileName');
@@ -235,9 +295,20 @@ class FontManager {
     }
     
     if (kIsWeb) {
-      // 从内存缓存加载
-      return _webMemoryCache[fontId] ?? _webMemoryCache['font_$fontId'];
+      // Web端：从后端服务器下载字体
+      try {
+        final response = await http.get(Uri.parse(ApiService.getFontUrl(fontId)));
+        if (response.statusCode == 200) {
+          return response.bodyBytes;
+        }
+        AppLogger.warning(logPrefixFont, "字体加载失败 (${response.statusCode}): $fontId");
+        return null;
+      } catch (e) {
+        AppLogger.error(logPrefixFont, "字体加载错误: $e");
+        return null;
+      }
     } else {
+      // 原生端：从本地文件加载
       final dir = await getApplicationDocumentsDirectory();
       // 首先尝试.ttf扩展名
       final ttfFile = io.File('${dir.path}/fonts/$fontId.ttf');
@@ -258,9 +329,15 @@ class FontManager {
     if (fontId == defaultFontId) return true;
     
     if (kIsWeb) {
-      // 检查内存缓存
-      return _webMemoryCache.containsKey(fontId) || _webMemoryCache.containsKey('font_$fontId');
+      // Web端：检查后端API
+      try {
+        return await ApiService.checkFontExists(fontId);
+      } catch (e) {
+        AppLogger.warning(logPrefixFont, "检查字体存在失败: $e");
+        return false;
+      }
     } else {
+      // 原生端：检查本地文件
       final dir = await getApplicationDocumentsDirectory();
       final ttfFile = io.File('${dir.path}/fonts/$fontId.ttf');
       final otfFile = io.File('${dir.path}/fonts/$fontId.otf');

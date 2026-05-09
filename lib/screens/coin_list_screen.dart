@@ -9,6 +9,7 @@ import '../providers/ui_providers.dart';
 import '../providers/coin_providers.dart';
 import '../providers/settings_provider.dart';
 import '../widgets/coin_image_widget.dart';
+import '../widgets/global_image_viewer.dart';
 import 'coin_edit_screen.dart';
 import 'settings_screen.dart';
 import '../utils/export_helper.dart';
@@ -152,6 +153,24 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
     return groups.keys.toList()..sort((a, b) => b.compareTo(a));
   }
 
+  /// 显示指定纪念币的全部图片画廊
+  Future<void> _showCoinImages(Coin coin) async {
+    final repo = ref.read(coinRepositoryProvider);
+    final images = await repo.getCoinImages(coin.id);
+    if (!mounted) return;
+    final paths = images.map((e) => e.imagePath).toList();
+    if (paths.isEmpty && coin.firstImagePath != null) {
+      paths.add(coin.firstImagePath!);
+    }
+    if (paths.isEmpty) return;
+    if (!mounted) return;
+    GlobalImageViewer.show(
+      context,
+      imagePaths: paths,
+      title: coin.name,
+    );
+  }
+
   /// 构建单个纪念币卡片（详情模式）
   Widget _buildDetailCoinItem(Coin coin, bool isSelected, Color bgColor, Map<String, String> seriesMap, String? selectedSeriesId) {
     return Container(
@@ -172,18 +191,16 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
                   });
                 },
               )
-            : CoinImageWidget(
-                imagePath: coin.firstImagePath,
-                width: 50, height: 50,
-                enablePreview: true,
-                previewTitle: coin.name,
+            : GestureDetector(
+                onTap: () => _showCoinImages(coin),
+                child: CoinImageWidget(
+                  imagePath: coin.firstImagePath,
+                  width: 50, height: 50,
+                ),
               ),
         title: Text(coin.name, style: const TextStyle(fontWeight: FontWeight.bold)),
         subtitle: Text('年份: ${coin.year ?? '未知'} | 收藏量: ${coin.quantity ?? 0} ${coin.quantityUnit ?? ''} | 单价: ￥${coin.unitPrice ?? 0}'),
-        trailing: _isSelectionMode ? null : IconButton(
-          icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
-          onPressed: () => _confirmDeleteCoin(context, ref, coin.id, coin.name),
-        ),
+        trailing: null,
         onLongPress: () {
           if (!_isSelectionMode) {
             setState(() {
@@ -252,12 +269,13 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
             Expanded(
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(8),
-                child: CoinImageWidget(
-                  imagePath: coin.firstImagePath,
-                  width: double.infinity,
-                  height: 120,
-                  enablePreview: true,
-                  previewTitle: coin.name,
+                child: GestureDetector(
+                  onTap: () => _showCoinImages(coin),
+                  child: CoinImageWidget(
+                    imagePath: coin.firstImagePath,
+                    width: double.infinity,
+                    height: 120,
+                  ),
                 ),
               ),
             ),
@@ -521,6 +539,11 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
           title: Text('已选择 ${_selectedCoinIds.length} 项'),
           actions: [
             if (_selectedCoinIds.isNotEmpty) ...[
+              IconButton(
+                icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
+                tooltip: '删除选中纪念币',
+                onPressed: () => _confirmBatchDeleteCoins(context, ref),
+              ),
               // 添加到系列
               IconButton(
                 icon: const Icon(Icons.bookmark_add),
@@ -1271,16 +1294,24 @@ Future<void> _pullFromCloud() async {
     );
   }
 
-  void _confirmDeleteCoin(BuildContext context, WidgetRef ref, String coinId, String coinName) {
+  void _confirmBatchDeleteCoins(BuildContext context, WidgetRef ref) {
+    final count = _selectedCoinIds.length;
     DialogHelper.showConfirmDialog(
       context: context,
-      title: '删除确认',
-      content: '确定要永久删除纪念币 "$coinName" 吗？',
+      title: '批量删除确认',
+      content: '确定要永久删除选中的 $count 枚纪念币吗？此操作不可撤销。',
       confirmText: '删除',
       isDestructive: true,
     ).then((confirmed) async {
       if (confirmed == true) {
-        await ref.read(coinRepositoryProvider).deleteCoin(coinId);
+        await ref.read(coinRepositoryProvider).deleteCoinsBatch(_selectedCoinIds.toList());
+        if (mounted) {
+          setState(() {
+            _isSelectionMode = false;
+            _selectedCoinIds.clear();
+          });
+          DialogHelper.showSuccessSnackBar(context, '已删除 $count 枚纪念币');
+        }
       }
     });
   }

@@ -8,6 +8,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'screens/home_screen.dart';
 import 'providers/sync_providers.dart';
+import 'providers/font_family_provider.dart';
 import 'utils/logger.dart';
 import 'services/api_service.dart' as api_service;
 
@@ -74,21 +75,18 @@ void main() async {
   });
 }
 
-class CoinManagerApp extends StatelessWidget {
+class CoinManagerApp extends ConsumerWidget {
   const CoinManagerApp({super.key});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    // 监听字体主题变化
+    final theme = ref.watch(appThemeWithFontProvider);
+    
     return MaterialApp(
       title: '纪念币收藏管理',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: Colors.blueGrey,
-          brightness: Brightness.light,
-        ),
-        useMaterial3: true,
-      ),
+      theme: theme,
       home: const HomeScreen(),
     );
   }

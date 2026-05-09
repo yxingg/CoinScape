@@ -56,7 +56,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       _loadLogLevel();
       
       // 测试日志系统是否工作
-      print('SETTINGS SCREEN INIT: 设置屏幕初始化完成');
+      // print('SETTINGS SCREEN INIT: 设置屏幕初始化完成');
       AppLogger.info(logPrefixSettings, '设置屏幕初始化完成 - 测试日志');
     });
   }
@@ -302,13 +302,13 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   Future<void> _push() async {
     if (!ref.read(webDavConfigProvider).isValid) {
        AppLogger.warning(logPrefixSettings, 'WebDAV 未配置');
-       print('SETTINGS DEBUG: WebDAV 未配置'); // 调试输出
+       AppLogger.info(logPrefixSettings, 'WebDAV 未配置'); // 调试输出
        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('请先配置并保存 WebDAV')));
        return;
     }
     setState(() => _isSyncing = true);
     AppLogger.info(logPrefixSettings, '开始 WebDAV 上传...');
-    print('SETTINGS DEBUG: 开始 WebDAV 上传...'); // 调试输出
+    AppLogger.info(logPrefixSettings, '开始 WebDAV 上传...'); // 调试输出
     try {
       final repo = ref.read(coinRepositoryProvider);
       final series = await repo.getAllSeries();
@@ -332,13 +332,13 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       }
 
       AppLogger.info(logPrefixSettings, '数据汇总: ${series.length} 个业务, ${coins.length} 枚纪念币');
-      print('SETTINGS DEBUG: 数据汇总: ${series.length} 个业务, ${coins.length} 枚纪念币'); // 调试输出
+      AppLogger.info(logPrefixSettings, '数据汇总: ${series.length} 个业务, ${coins.length} 枚纪念币'); // 调试输出
       final service = _getService();
-      print('SETTINGS DEBUG: 调用 service.pushBackup()...'); // 调试输出
+      AppLogger.info(logPrefixSettings, '调用 service.pushBackup()...'); // 调试输出
       await service.pushBackup(series, coins, links, coinImages, seriesImages);
       
       AppLogger.info(logPrefixSettings, 'WebDAV 上传成功');
-      print('SETTINGS DEBUG: WebDAV 上传成功'); // 调试输出
+      AppLogger.info(logPrefixSettings, 'WebDAV 上传成功'); // 调试输出
       if (mounted) {
         DialogHelper.showSuccessSnackBar(context, '推送(上传)成功！');
       }
@@ -347,15 +347,17 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       final errorStr = e.toString();
       final fullError = '上传失败: $errorStr\n类型: ${e.runtimeType}\n栈追踪: $st';
       AppLogger.error(logPrefixSettings, fullError, st);
-      print('🎯 SETTINGS ERROR: 上传失败 - $errorStr');
-      print('🎯 SETTINGS ERROR TYPE: ${e.runtimeType}');
-      print('🎯 SETTINGS ERROR STACK: $st');
+AppLogger.error(logPrefixSettings, '上传失败 - $errorStr');
+
+      AppLogger.error(logPrefixSettings, '上传失败类型: ${e.runtimeType}');
+
+      AppLogger.error(logPrefixSettings, '堆栈跟踪: $st');
       if (mounted) {
         DialogHelper.showErrorSnackBar(context, '云端备份失败: $errorStr');
       }
     } finally {
       if (mounted) setState(() => _isSyncing = false);
-      print('SETTINGS DEBUG: 上传操作完成'); // 调试输出
+      AppLogger.info(logPrefixSettings, '上传操作完成'); // 调试输出
     }
   }
 
@@ -385,9 +387,11 @@ AppLogger.warning(logPrefixSettings, 'WebDAV 未配置');
       final errorStr = e.toString();
       final fullError = '下载失败: $errorStr\n类型: ${e.runtimeType}\n栈追踪: $st';
       AppLogger.error(logPrefixSettings, fullError, st);
-      print('🎯 SETTINGS ERROR: 下载失败 - $errorStr');
-      print('🎯 SETTINGS ERROR TYPE: ${e.runtimeType}');
-      print('🎯 SETTINGS ERROR STACK: $st');
+AppLogger.error(logPrefixSettings, '下载失败 - $errorStr');
+
+      AppLogger.error(logPrefixSettings, '下载失败类型: ${e.runtimeType}');
+
+      AppLogger.error(logPrefixSettings, '堆栈跟踪: $st');
       if (mounted) {
         DialogHelper.showErrorSnackBar(context, '云端备份下载失败: $errorStr');
       }

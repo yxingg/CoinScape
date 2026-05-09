@@ -571,7 +571,7 @@ Future<Uint8List> generateCoinsPdf(
                       ),
                       pw.Padding(
                         padding: const pw.EdgeInsets.all(8),
-                        child: pw.Text('${c.material ?? '-'}'),
+                        child: pw.Text('${c.material ?? "-"}'),
                       ),
                     ],
                   ),

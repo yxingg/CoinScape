@@ -10,7 +10,7 @@ import json
 import os
 import shutil
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Dict, Any
 
 # ============================================================
 # CONFIG: config.json support for save_path
@@ -415,7 +415,70 @@ def import_all_data(data: dict):
         cursor.execute(
             "INSERT OR REPLACE INTO series_images (id, series_id, image_path, sort_order) VALUES (?, ?, ?, ?)",
             (img["id"], img["series_id"], img["image_path"], img.get("sort_order", 0))
-        )
+)
     
     conn.commit()
     conn.close()
+
+
+# ============================================================
+# Settings management
+# ============================================================
+
+SETTINGS_FILE = os.path.join(SAVE_PATH, "app_settings.json")
+
+def load_app_settings() -> Dict[str, Any]:
+    """Load application settings from settings.json file."""
+    if os.path.isfile(SETTINGS_FILE):
+        try:
+            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError) as e:
+            print(f"Error loading settings: {e}")
+    
+    # Return default settings
+    return {
+        "appearance": {
+            "theme": "system",
+            "font_family": "default",
+            "font_size": 14,
+            "density": "comfortable"
+        },
+        "behavior": {
+            "auto_save": True,
+            "confirm_deletions": True,
+            "show_tutorial": True
+        },
+        "export": {
+            "default_format": "pdf",
+            "include_images": True,
+            "compress_pdf": False
+        },
+        "sync": {
+            "auto_sync": False,
+            "sync_interval": 3600
+        }
+    }
+
+def save_app_settings(settings: Dict[str, Any]):
+    """Save application settings to settings.json file."""
+    ensure_dirs()
+    with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+        json.dump(settings, f, indent=2, ensure_ascii=False)
+
+def update_app_settings(updates: Dict[str, Any]) -> Dict[str, Any]:
+    """Update specific settings and return the full updated settings."""
+    current = load_app_settings()
+    
+    # Deep merge updates
+    def deep_merge(target: Dict[str, Any], source: Dict[str, Any]) -> Dict[str, Any]:
+        for key, value in source.items():
+            if key in target and isinstance(target[key], dict) and isinstance(value, dict):
+                target[key] = deep_merge(target[key], value)
+            else:
+                target[key] = value
+        return target
+    
+    updated = deep_merge(current, updates)
+    save_app_settings(updated)
+    return updated

@@ -411,42 +411,137 @@ async def upload_image(file: UploadFile = File(...)):
 
 
 @app.get("/api/images/file/{filename:path}")
-async def get_image_file(filename: str):
-    """Serve an uploaded image file."""
+async def get_image_file(filename: str, width: Optional[int] = None, height: Optional[int] = None):
+    """Serve an uploaded image file with optional resize for thumbnails.
+
+    Query params:
+        width:  Target width in pixels (optional)
+        height: Target height in pixels (optional)
+    When width/height are provided, the server returns a resized image
+    (aspect-ratio preserved) with aggressive cache headers.
+    """
     normalized = filename.replace('\\', '/').lstrip('/')
     if normalized.startswith('images/'):
         normalized = normalized[len('images/'):]
     filepath = os.path.join(db.IMAGES_DIR, normalized)
     if not os.path.isfile(filepath):
         raise HTTPException(status_code=404, detail="Image not found")
-    return FileResponse(filepath)
+
+    if width is not None or height is not None:
+        try:
+            from PIL import Image as PILImage
+            import io
+
+            cache_dir = os.path.join(db.IMAGES_DIR, ".thumb_cache")
+            os.makedirs(cache_dir, exist_ok=True)
+
+            w = width or 0
+            h = height or 0
+            cache_key = f"{os.path.splitext(normalized)[0]}_{w}x{h}{os.path.splitext(normalized)[1]}"
+            cache_path = os.path.join(cache_dir, cache_key)
+
+            if not os.path.isfile(cache_path):
+                with PILImage.open(filepath) as img:
+                    orig_w, orig_h = img.size
+                    if width and height:
+                        target_w, target_h = width, height
+                    elif width:
+                        ratio = width / orig_w
+                        target_w, target_h = width, int(orig_h * ratio)
+                    else:
+                        ratio = height / orig_h
+                        target_w, target_h = int(orig_w * ratio), height
+
+                    resized = img.resize((target_w, target_h), PILImage.LANCZOS)
+                    buf = io.BytesIO()
+                    fmt = img.format or "JPEG"
+                    if fmt.upper() == "JPG":
+                        fmt = "JPEG"
+                    resized.save(buf, format=fmt, quality=85)
+                    buf.seek(0)
+                    with open(cache_path, "wb") as f:
+                        f.write(buf.getvalue())
+
+            return FileResponse(
+                cache_path,
+                headers={
+                    "Cache-Control": "public, max-age=86400, immutable",
+                },
+            )
+        except ImportError:
+            pass
+        except Exception:
+            pass
+
+    return FileResponse(
+        filepath,
+        headers={
+            "Cache-Control": "public, max-age=3600",
+        },
+    )
 
 
 # ============================================================
 # Fonts API
 # ============================================================
 
+@app.get("/api/fonts/")
+async def list_fonts():
+    """List all available font files."""
+    db.ensure_dirs()
+    fonts = []
+    if os.path.exists(db.FONTS_DIR):
+        for filename in os.listdir(db.FONTS_DIR):
+            if filename.lower().endswith(('.ttf', '.otf')):
+                filepath = os.path.join(db.FONTS_DIR, filename)
+                stat = os.stat(filepath)
+                font_id = os.path.splitext(filename)[0]
+                fonts.append({
+                    "id": font_id,
+                    "filename": filename,
+                    "size": stat.st_size,
+                    "modified_at": stat.st_mtime,
+                    "filepath": f"/api/fonts/{font_id}"
+                })
+    return {"fonts": sorted(fonts, key=lambda x: x["modified_at"], reverse=True)}
+
+
 @app.get("/api/fonts/{font_id}")
 async def get_font(font_id: str):
     """Get a font file by its ID."""
-    filepath = os.path.join(db.FONTS_DIR, f"{font_id}.ttf")
-    if not os.path.isfile(filepath):
-        raise HTTPException(status_code=404, detail="Font not found")
-    return FileResponse(filepath, media_type="font/ttf")
+    # 尝试不同扩展名
+    for ext in ['.ttf', '.otf']:
+        filepath = os.path.join(db.FONTS_DIR, f"{font_id}{ext}")
+        if os.path.isfile(filepath):
+            return FileResponse(filepath, media_type="font/ttf" if ext == '.ttf' else "font/otf")
+    raise HTTPException(status_code=404, detail="Font not found")
 
 
 @app.post("/api/fonts/upload")
 async def upload_font(file: UploadFile = File(...)):
     """Upload a font file and return its ID."""
     db.ensure_dirs()
-    font_id = f"custom_{datetime.now().timestamp()}"
-    filepath = os.path.join(db.FONTS_DIR, f"{font_id}.ttf")
+    
+    # 获取原始文件名并安全化
+    original_name = file.filename or "font"
+    safe_name = "".join(c for c in original_name if c.isalnum() or c in ('-', '_', '.')).rstrip()
+    
+    # 提取文件名（不含扩展名）和扩展名
+    name_without_ext = os.path.splitext(safe_name)[0]
+    ext = os.path.splitext(safe_name)[1].lower()
+    if ext not in ['.ttf', '.otf']:
+        ext = '.ttf'  # 默认使用.ttf
+    
+    # 生成唯一ID：使用原始文件名 + 时间戳
+    font_id = f"{name_without_ext}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    
+    filepath = os.path.join(db.FONTS_DIR, f"{font_id}{ext}")
     
     content = await file.read()
     with open(filepath, "wb") as f:
         f.write(content)
     
-    return {"font_id": font_id}
+    return {"font_id": font_id, "filename": f"{font_id}{ext}", "original_name": original_name}
 
 
 @app.get("/api/fonts/check/{font_id}")
@@ -463,6 +558,43 @@ async def delete_font(font_id: str):
     if os.path.isfile(filepath):
         os.remove(filepath)
     return {"success": True}
+
+
+# ============================================================
+# Application Settings API
+# ============================================================
+
+@app.get("/api/settings")
+async def get_settings():
+    """Get all application settings."""
+    return db.load_app_settings()
+
+
+@app.put("/api/settings")
+async def update_settings(data: dict = Body(...)):
+    """Update application settings."""
+    updated = db.update_app_settings(data)
+    return {"success": True, "settings": updated}
+
+
+@app.patch("/api/settings/{category}")
+async def update_settings_category(category: str, data: dict = Body(...)):
+    """Update settings for a specific category."""
+    # 确保类别是有效的
+    valid_categories = ["appearance", "behavior", "export", "sync"]
+    if category not in valid_categories:
+        raise HTTPException(status_code=400, detail=f"Invalid category. Must be one of: {valid_categories}")
+    
+    current = db.load_app_settings()
+    if category not in current:
+        current[category] = {}
+    
+    # 合并更新
+    for key, value in data.items():
+        current[category][key] = value
+    
+    db.save_app_settings(current)
+    return {"success": True, "settings": current}
 
 
 # ============================================================
@@ -692,8 +824,30 @@ async def proxy_webdav_impl(request: Request):
 
 
 # ============================================================
-# Static files (Flutter Web build output) - mounted AFTER API routes
-# ============================================================
+    # Font files static serving
+    # ============================================================
+    
+    @app.get("/fonts/{filename:path}")
+    async def serve_font(filename: str):
+        """Serve font files directly."""
+        normalized = filename.replace('\\', '/').lstrip('/')
+        filepath = os.path.join(db.FONTS_DIR, normalized)
+        if not os.path.isfile(filepath):
+            raise HTTPException(status_code=404, detail="Font file not found")
+        
+        # 根据文件扩展名设置正确的媒体类型
+        if filename.lower().endswith('.ttf'):
+            media_type = "font/ttf"
+        elif filename.lower().endswith('.otf'):
+            media_type = "font/otf"
+        else:
+            media_type = "application/octet-stream"
+            
+        return FileResponse(filepath, media_type=media_type)
+    
+    # ============================================================
+    # Static files (Flutter Web build output) - mounted AFTER API routes
+    # ============================================================
 
 _script_dir = os.path.dirname(os.path.abspath(__file__))
 _web_build_dir = os.path.join(_script_dir, "..", "build", "web")

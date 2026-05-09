@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as p;
 import '../services/api_service.dart';
+import 'global_image_viewer.dart';
 
 class CoinImageWidget extends StatelessWidget {
   final String? imagePath;
@@ -14,6 +15,9 @@ class CoinImageWidget extends StatelessWidget {
   final BoxFit fit;
   final bool enablePreview;
   final String? previewTitle;
+  final List<String>? imagePaths;
+  final Map<String, Uint8List>? imageBytesMap;
+  final bool useThumbnail;
 
   const CoinImageWidget({
     super.key,
@@ -24,6 +28,9 @@ class CoinImageWidget extends StatelessWidget {
     this.fit = BoxFit.contain,
     this.enablePreview = false,
     this.previewTitle,
+    this.imagePaths,
+    this.imageBytesMap,
+    this.useThumbnail = true,
   });
 
   @override
@@ -40,8 +47,20 @@ class CoinImageWidget extends StatelessWidget {
     );
   }
 
+  void _openPreview(BuildContext context) {
+    final hasGallery = imagePaths != null && imagePaths!.length > 1;
+    GlobalImageViewer.show(
+      context,
+      imagePaths: hasGallery ? imagePaths : (imagePath != null ? [imagePath!] : null),
+      imageBytes: hasGallery
+          ? imageBytesMap
+          : (imageBytes != null ? {imagePath ?? '': imageBytes!} : null),
+      initialIndex: 0,
+      title: previewTitle,
+    );
+  }
+
   Widget _buildImage() {
-    // 1. 如果新选了图片放在了内存里，优先加载
     if (imageBytes != null) {
       return Image.memory(imageBytes!, width: width, height: height, fit: fit);
     }
@@ -50,7 +69,6 @@ class CoinImageWidget extends StatelessWidget {
       return _buildPlaceholder();
     }
 
-    // 2. 根据平台处理逻辑
     if (kIsWeb) {
       if (imagePath!.startsWith('base64:')) {
         try {
@@ -60,9 +78,15 @@ class CoinImageWidget extends StatelessWidget {
           return _buildPlaceholder();
         }
       }
-      // Web 端：从后端服务器加载图片
+      final imageUrl = useThumbnail
+          ? ApiService.getThumbnailUrl(
+              imagePath!,
+              width: width.isInfinite ? null : width.toInt(),
+              height: height.isInfinite ? null : height.toInt(),
+            )
+          : ApiService.getImageUrl(imagePath!);
       return Image.network(
-        ApiService.getImageUrl(imagePath!),
+        imageUrl,
         width: width,
         height: height,
         fit: fit,
@@ -83,7 +107,6 @@ class CoinImageWidget extends StatelessWidget {
         },
       );
     } else {
-      // 原生环境：组装完整路径
       return FutureBuilder<Directory>(
         future: getApplicationDocumentsDirectory(),
         builder: (context, snapshot) {
@@ -99,37 +122,6 @@ class CoinImageWidget extends StatelessWidget {
         },
       );
     }
-  }
-
-  void _openPreview(BuildContext context) {
-    showDialog(
-      context: context,
-      builder: (ctx) => Dialog(
-        insetPadding: const EdgeInsets.all(16),
-        child: Padding(
-          padding: const EdgeInsets.all(12),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Row(
-                children: [
-                  Expanded(child: Text(previewTitle ?? '图片预览', style: Theme.of(ctx).textTheme.titleMedium)),
-                  IconButton(onPressed: () => Navigator.pop(ctx), icon: const Icon(Icons.close)),
-                ],
-              ),
-              const SizedBox(height: 8),
-              Flexible(
-                child: InteractiveViewer(
-                  minScale: 0.8,
-                  maxScale: 4,
-                  child: _buildImage(),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
   }
 
   Widget _buildPlaceholder() {
