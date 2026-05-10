@@ -1,0 +1,85 @@
+import 'dart:convert';
+import 'package:flutter/foundation.dart';
+import 'package:path_provider/path_provider.dart';
+import 'dart:io' as io;
+import '../utils/logger.dart';
+
+class LocalConfigService {
+  static const String _configFileName = 'app_config.json';
+  static Map<String, dynamic>? _cache;
+
+  static Future<io.File?> _getConfigFile() async {
+    if (kIsWeb) return null;
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      final file = io.File('${dir.path}/$_configFileName');
+      return file;
+    } catch (e) {
+      AppLogger.error('Config', '获取配置文件路径失败: $e');
+      return null;
+    }
+  }
+
+  static Future<Map<String, dynamic>> load() async {
+    if (_cache != null) return _cache!;
+
+    if (kIsWeb) {
+      _cache = {};
+      return _cache!;
+    }
+
+    try {
+      final file = await _getConfigFile();
+      if (file != null && await file.exists()) {
+        final content = await file.readAsString();
+        _cache = jsonDecode(content) as Map<String, dynamic>;
+        AppLogger.info('Config', '已加载本地配置文件');
+        return _cache!;
+      }
+    } catch (e) {
+      AppLogger.error('Config', '加载配置文件失败: $e');
+    }
+
+    _cache = {};
+    return _cache!;
+  }
+
+  static Future<void> save(Map<String, dynamic> data) async {
+    _cache = data;
+
+    if (kIsWeb) return;
+
+    try {
+      final file = await _getConfigFile();
+      if (file != null) {
+        final content = jsonEncode(data);
+        await file.writeAsString(content);
+        AppLogger.info('Config', '已保存本地配置文件');
+      }
+    } catch (e) {
+      AppLogger.error('Config', '保存配置文件失败: $e');
+    }
+  }
+
+  static Future<T?> get<T>(String key) async {
+    final data = await load();
+    return data[key] as T?;
+  }
+
+  static Future<void> set(String key, dynamic value) async {
+    final data = await load();
+    data[key] = value;
+    await save(data);
+  }
+
+  static Future<Map<String, dynamic>> getSection(String section) async {
+    final data = await load();
+    return (data[section] as Map<String, dynamic>?) ?? {};
+  }
+
+  static Future<void> setSection(String section, Map<String, dynamic> sectionData) async {
+    final data = await load();
+    data[section] = sectionData;
+    await save(data);
+  }
+}

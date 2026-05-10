@@ -3,7 +3,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:drift/drift.dart' as drift;
-import 'package:shared_preferences/shared_preferences.dart';
 
 import '../providers/settings_provider.dart';
 import '../providers/sync_providers.dart';
@@ -34,7 +33,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   bool _isSyncing = false;
   bool _isBackendConnected = false;
   bool _isCheckingBackend = false;
-  bool _isLoadingConfig = false;
   bool _isSavingPath = false;
   
   // 日志配置相关
@@ -50,22 +48,25 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     _backendUrlCtrl = TextEditingController(text: ApiService.baseUrl);
     _savePathCtrl = TextEditingController();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _initializeFromProvider();
+      _loadSettingsToUI();
       _checkBackendConnection();
-      _loadSavePath();
-      _loadLogLevel();
-      
-      // 测试日志系统是否工作
-      // print('SETTINGS SCREEN INIT: 设置屏幕初始化完成');
-      AppLogger.info(logPrefixSettings, '设置屏幕初始化完成 - 测试日志');
     });
   }
 
-  void _initializeFromProvider() {
-    final config = ref.read(webDavConfigProvider);
-    _urlCtrl.text = config.url;
-    _userCtrl.text = config.user;
-    _pwdCtrl.text = config.password;
+  void _loadSettingsToUI() {
+    final settings = ref.read(settingsProvider);
+    _backendUrlCtrl.text = settings.backendUrl;
+    _savePathCtrl.text = settings.savePath;
+    _urlCtrl.text = settings.webDavUrl;
+    _userCtrl.text = settings.webDavUser;
+    _pwdCtrl.text = settings.webDavPassword;
+
+    final level = LogLevel.values.firstWhere(
+      (e) => e.name == settings.logLevel,
+      orElse: () => LogLevel.info,
+    );
+    setState(() => _selectedLogLevel = level);
+    AppLogger.setLogLevel(level);
   }
 
   @override
@@ -90,162 +91,13 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     }
   }
 
-  Future<void> _loadSavePath() async {
-    setState(() => _isLoadingConfig = true);
-    try {
-      final config = await ApiService.getConfig();
-      if (mounted) {
-        _savePathCtrl.text = config['save_path'] as String? ?? '';
-      }
-    } catch (e) {
-      // 忽略错误，保持空值
-    } finally {
-      if (mounted) {
-        setState(() => _isLoadingConfig = false);
-      }
-    }
-  }
-
-  /// 加载日志级别
-  Future<void> _loadLogLevel() async {
-    setState(() => _isLoadingLogLevel = true);
-    try {
-      // 从SharedPreferences加载保存的日志级别
-      final prefs = await SharedPreferences.getInstance();
-      final savedLevel = prefs.getString('log_level');
-      if (savedLevel != null) {
-        final level = LogLevel.values.firstWhere(
-          (e) => e.name == savedLevel,
-          orElse: () => LogLevel.info,
-        );
-        setState(() => _selectedLogLevel = level);
-        AppLogger.setLogLevel(level);
-      }
-    } catch (e) {
-      AppLogger.error(logPrefixSettings, '加载日志级别失败: $e');
-    } finally {
-      if (mounted) {
-        setState(() => _isLoadingLogLevel = false);
-      }
-    }
-  }
-
-  /// 保存日志级别
-  Future<void> _saveLogLevel() async {
-    setState(() => _isLoadingLogLevel = true);
-    try {
-      // 保存到SharedPreferences
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString('log_level', _selectedLogLevel.name);
-      
-      // 更新AppLogger
-      AppLogger.setLogLevel(_selectedLogLevel);
-      
-      if (mounted) {
-        DialogHelper.showSuccessSnackBar(context, '日志级别已设置为: ${_selectedLogLevel.name.toUpperCase()}');
-      }
-    } catch (e) {
-      AppLogger.error(logPrefixSettings, '保存日志级别失败: $e');
-      if (mounted) {
-        DialogHelper.showErrorSnackBar(context, '保存日志级别失败: $e');
-      }
-    } finally {
-      if (mounted) {
-        setState(() => _isLoadingLogLevel = false);
-      }
-    }
-  }
-
-  /// 清空日志文件
-  Future<void> _clearLogFile() async {
-    try {
-      if (kIsWeb) {
-        // Web平台使用localStorage
-        try {
-          await AppLogger.clearWebLogs();
-          
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text('Web日志已清空'),
-                duration: const Duration(seconds: 3),
-              ),
-            );
-          }
-          AppLogger.info(logPrefixSettings, 'Web日志已清空');
-        } catch (e) {
-          AppLogger.error(logPrefixSettings, '清空Web日志失败: $e');
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Text('清空日志失败: $e'),
-                backgroundColor: Colors.red,
-                duration: const Duration(seconds: 3),
-              ),
-            );
-          }
-        }
-        return;
-      }
-      
-      // 桌面/移动平台使用文件系统
-      final logPath = await AppLogger.getConfiguredLogPath();
-      if (logPath != null) {
-        final file = File(logPath);
-        if (await file.exists()) {
-          await file.writeAsString('');
-          
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text('日志文件已清空'),
-                duration: const Duration(seconds: 3),
-              ),
-            );
-          }
-          AppLogger.info(logPrefixSettings, '日志文件已清空');
-        } else {
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text('日志文件不存在'),
-                backgroundColor: Colors.orange,
-                duration: const Duration(seconds: 3),
-              ),
-            );
-          }
-        }
-      } else {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('无法获取日志文件路径'),
-              backgroundColor: Colors.red,
-              duration: const Duration(seconds: 3),
-            ),
-          );
-        }
-      }
-    } catch (e) {
-      AppLogger.error(logPrefixSettings, '清空日志文件失败: $e');
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('清空日志文件失败: $e'),
-            backgroundColor: Colors.red,
-            duration: const Duration(seconds: 3),
-          ),
-        );
-      }
-    }
-  }
-
   Future<void> _saveSavePath() async {
     final path = _savePathCtrl.text.trim();
     if (path.isEmpty) return;
     setState(() => _isSavingPath = true);
     try {
       final result = await ApiService.updateSavePath(path);
+      await ref.read(settingsProvider.notifier).update((s) => s.copyWith(savePath: path));
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text(result['message'] as String? ?? '保存路径已更新，重启服务器后生效')),
@@ -268,9 +120,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     
     try {
       await ApiService.saveBaseUrl(url);
+      await ref.read(settingsProvider.notifier).update((s) => s.copyWith(backendUrl: url));
       if (mounted) {
         DialogHelper.showSuccessSnackBar(context, '后端服务地址已保存');
-        // 刷新连接状态
         await _checkBackendConnection();
       }
     } catch (e) {
@@ -284,11 +136,16 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
   Future<void> _saveConfig() async {
     if (_formKey.currentState!.validate()) {
-      await ref.read(webDavConfigProvider.notifier).saveConfig(
-        _urlCtrl.text.trim(),
-        _userCtrl.text.trim(),
-        _pwdCtrl.text.trim(),
-      );
+      final url = _urlCtrl.text.trim();
+      final user = _userCtrl.text.trim();
+      final pwd = _pwdCtrl.text.trim();
+      
+      await ref.read(webDavConfigProvider.notifier).saveConfig(url, user, pwd);
+      await ref.read(settingsProvider.notifier).update((s) => s.copyWith(
+        webDavUrl: url,
+        webDavUser: user,
+        webDavPassword: pwd,
+      ));
       if (mounted) {
         DialogHelper.showSuccessSnackBar(context, '配置已保存');
       }
@@ -723,32 +580,67 @@ AppLogger.error(logPrefixSettings, '下载失败 - $errorStr');
         child: Column(
           children: [
             const ListTile(
-              title: Text('导出 PDF 字体配置', style: TextStyle(fontWeight: FontWeight.bold)),
-              subtitle: Text('设置 PDF 报告的默认排版字体'),
+              title: Text('字体设置', style: TextStyle(fontWeight: FontWeight.bold)),
+              subtitle: Text('配置界面显示字体和导出PDF字体'),
               leading: Icon(Icons.font_download),
             ),
             const Divider(),
+            // 显示字体
             ListTile(
-              title: const Text('主要字体 (中文)'),
+              title: const Text('显示字体'),
               subtitle: FutureBuilder<String>(
-                future: _getFontName(settings.chineseFontId),
+                future: _getFontName(settings.displayFontId),
                 builder: (context, snapshot) {
-                  return Text(snapshot.data ?? settings.chineseFontId);
+                  return Text(snapshot.data ?? settings.displayFontId);
                 },
               ),
               trailing: const Icon(Icons.edit),
-              onTap: () => _showFontPicker(context, true),
+              onTap: () => _showFontPickerForField(context, 'displayFontId'),
+            ),
+            // 字号
+            ListTile(
+              title: const Text('字号'),
+              subtitle: Text('${settings.fontSize.toInt()} sp'),
+              trailing: const Icon(Icons.edit),
+              onTap: () => _showFontSizePicker(context, settings),
+            ),
+            // Density
+            ListTile(
+              title: const Text('界面密度'),
+              subtitle: Text(_densityLabel(settings.density)),
+              trailing: const Icon(Icons.edit),
+              onTap: () => _showDensityPicker(context, settings),
+            ),
+            const Divider(),
+            // PDF 字体标题
+            const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text('导出 PDF 字体', style: TextStyle(fontWeight: FontWeight.w500, color: Colors.grey)),
+              ),
             ),
             ListTile(
-              title: const Text('次要字体 (英文/数字)'),
+              title: const Text('中文字体'),
               subtitle: FutureBuilder<String>(
-                future: _getFontName(settings.englishFontId),
+                future: _getFontName(settings.pdfChineseFontId),
                 builder: (context, snapshot) {
-                  return Text(snapshot.data ?? settings.englishFontId);
+                  return Text(snapshot.data ?? settings.pdfChineseFontId);
                 },
               ),
               trailing: const Icon(Icons.edit),
-              onTap: () => _showFontPicker(context, false),
+              onTap: () => _showFontPickerForField(context, 'pdfChineseFontId'),
+            ),
+            ListTile(
+              title: const Text('英文/数字字体'),
+              subtitle: FutureBuilder<String>(
+                future: _getFontName(settings.pdfEnglishFontId),
+                builder: (context, snapshot) {
+                  return Text(snapshot.data ?? settings.pdfEnglishFontId);
+                },
+              ),
+              trailing: const Icon(Icons.edit),
+              onTap: () => _showFontPickerForField(context, 'pdfEnglishFontId'),
             ),
           ],
         ),
@@ -756,16 +648,25 @@ AppLogger.error(logPrefixSettings, '下载失败 - $errorStr');
     );
   }
 
-  Future<void> _showFontPicker(BuildContext context, bool isChinese) async {
-    final curId = isChinese ? ref.read(settingsProvider).chineseFontId : ref.read(settingsProvider).englishFontId;
+  String _densityLabel(String density) {
+    switch (density) {
+      case 'compact': return '紧凑';
+      case 'comfortable': return '舒适';
+      case 'expanded': return '宽松';
+      default: return '舒适';
+    }
+  }
+
+  Future<void> _showFontPickerForField(BuildContext context, String fieldKey) async {
+    final settings = ref.read(settingsProvider);
+    final curId = settings.toJson()[fieldKey] as String? ?? 'default';
     if (!mounted) return;
-    
-    // 加载本地字体列表
+
     final localFonts = await FontManager.getLocalFonts();
-    
+
     DialogHelper.showCustomDialog<String>(
       context: context,
-      title: isChinese ? '选择中文字体' : '选择英文字体',
+      title: '选择字体',
       content: SizedBox(
         width: double.maxFinite,
         child: StatefulBuilder(
@@ -773,9 +674,7 @@ AppLogger.error(logPrefixSettings, '下载失败 - $errorStr');
             return Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                // 默认系统字体选项
                 _buildFontOption(ctx, FontManager.defaultFontId, FontManager.getFontName(FontManager.defaultFontId), curId),
-                
                 if (localFonts.isNotEmpty) ...[
                   const Divider(height: 20),
                   Padding(
@@ -784,22 +683,12 @@ AppLogger.error(logPrefixSettings, '下载失败 - $errorStr');
                       children: [
                         const Icon(Icons.font_download, size: 16, color: Colors.grey),
                         const SizedBox(width: 8),
-                        Text(
-                          '本地字体 (${localFonts.length})',
-                          style: const TextStyle(
-                            fontSize: 14,
-                            fontWeight: FontWeight.w500,
-                            color: Colors.grey,
-                          ),
-                        ),
+                        Text('本地字体 (${localFonts.length})', style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500, color: Colors.grey)),
                       ],
                     ),
                   ),
-                  ...localFonts.map((font) => 
-                    _buildFontOption(ctx, font.id, font.name, curId)
-                  ).toList(),
+                  ...localFonts.map((font) => _buildFontOption(ctx, font.id, font.name, curId)).toList(),
                 ],
-                
                 const Divider(height: 20),
                 ListTile(
                   leading: const Icon(Icons.add_circle_outline),
@@ -807,21 +696,19 @@ AppLogger.error(logPrefixSettings, '下载失败 - $errorStr');
                   subtitle: const Text('支持 .ttf 和 .otf 格式'),
                   onTap: () async {
                     Navigator.pop(context);
-                    await _importLocalFonts(isChinese);
+                    await _importLocalFonts();
                   },
                 ),
-                
-                if (localFonts.isNotEmpty) ...[
+                if (localFonts.isNotEmpty)
                   ListTile(
                     leading: const Icon(Icons.delete_outline, color: Colors.red),
                     title: const Text('管理本地字体...'),
                     subtitle: const Text('查看或删除已添加的字体'),
                     onTap: () async {
                       Navigator.pop(context);
-                      await _manageLocalFonts(isChinese);
+                      await _manageLocalFonts();
                     },
                   ),
-                ],
               ],
             );
           },
@@ -829,11 +716,14 @@ AppLogger.error(logPrefixSettings, '下载失败 - $errorStr');
       ),
     ).then((selectedId) async {
       if (selectedId != null && selectedId.isNotEmpty) {
-        if (isChinese) {
-          await ref.read(settingsProvider.notifier).setChineseFont(selectedId);
-        } else {
-          await ref.read(settingsProvider.notifier).setEnglishFont(selectedId);
-        }
+        await ref.read(settingsProvider.notifier).update((s) {
+          switch (fieldKey) {
+            case 'displayFontId': return s.copyWith(displayFontId: selectedId);
+            case 'pdfChineseFontId': return s.copyWith(pdfChineseFontId: selectedId);
+            case 'pdfEnglishFontId': return s.copyWith(pdfEnglishFontId: selectedId);
+            default: return s;
+          }
+        });
         if (mounted) {
           DialogHelper.showSuccessSnackBar(context, '已应用字体: ${FontManager.getFontName(selectedId)}');
         }
@@ -841,44 +731,80 @@ AppLogger.error(logPrefixSettings, '下载失败 - $errorStr');
     });
   }
 
-  Widget _buildFontOption(BuildContext ctx, String id, String name, String curId) {
-    return ListTile(
-      leading: Icon(curId == id ? Icons.check_circle : Icons.circle_outlined, 
-               color: curId == id ? Colors.green : Colors.grey),
-      title: Text(name),
-      subtitle: id == FontManager.defaultFontId ? const Text('系统默认字体') : null,
-      onTap: () => Navigator.pop(ctx, id),
+  Future<void> _showFontSizePicker(BuildContext context, AppSettings settings) async {
+    double tempSize = settings.fontSize;
+    final result = await showDialog<double>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: const Text('字号设置'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text('${tempSize.toInt()} sp', style: TextStyle(fontSize: tempSize)),
+              const SizedBox(height: 16),
+              Slider(
+                value: tempSize,
+                min: 10,
+                max: 24,
+                divisions: 14,
+                label: '${tempSize.toInt()} sp',
+                onChanged: (v) => setDialogState(() => tempSize = v),
+              ),
+              const Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [Text('10', style: TextStyle(fontSize: 10)), Text('24', style: TextStyle(fontSize: 24))],
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+            FilledButton(onPressed: () => Navigator.pop(ctx, tempSize), child: const Text('确定')),
+          ],
+        ),
+      ),
     );
+    if (result != null) {
+      await ref.read(settingsProvider.notifier).update((s) => s.copyWith(fontSize: result));
+    }
   }
-  
-  /// 导入本地字体文件
-  Future<void> _importLocalFonts(bool isChinese) async {
+
+  Future<void> _showDensityPicker(BuildContext context, AppSettings settings) async {
+    final result = await showDialog<String>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('界面密度'),
+        children: [
+          SimpleDialogOption(onPressed: () => Navigator.pop(ctx, 'compact'), child: const Text('紧凑')),
+          SimpleDialogOption(onPressed: () => Navigator.pop(ctx, 'comfortable'), child: const Text('舒适')),
+          SimpleDialogOption(onPressed: () => Navigator.pop(ctx, 'expanded'), child: const Text('宽松')),
+        ],
+      ),
+    );
+    if (result != null) {
+      await ref.read(settingsProvider.notifier).update((s) => s.copyWith(density: result));
+    }
+  }
+
+  Future<void> _importLocalFonts() async {
     final fontIds = await FontManager.pickAndSaveCustomFonts();
-    
-    if (fontIds.isNotEmpty) {
-      if (mounted) {
-        DialogHelper.showSuccessSnackBar(context, '已导入 ${fontIds.length} 个字体文件');
-      }
-      // 导入完成后重新显示选择器
+    if (fontIds.isNotEmpty && mounted) {
+      DialogHelper.showSuccessSnackBar(context, '已导入 ${fontIds.length} 个字体文件');
       await Future.delayed(const Duration(milliseconds: 500));
       if (mounted) {
-        _showFontPicker(context, isChinese);
+        final settings = ref.read(settingsProvider);
+        _showFontPickerForField(context, 'displayFontId');
       }
     }
   }
-  
-  /// 管理本地字体
-  Future<void> _manageLocalFonts(bool isChinese) async {
+
+  Future<void> _manageLocalFonts() async {
     final localFonts = await FontManager.getLocalFonts();
-    
     if (localFonts.isEmpty) {
-      if (mounted) {
-        DialogHelper.showWarningSnackBar(context, '暂无本地字体文件');
-      }
+      if (mounted) DialogHelper.showWarningSnackBar(context, '暂无本地字体文件');
       return;
     }
-    
-    final result = await DialogHelper.showCustomDialog<String>(
+    await DialogHelper.showCustomDialog<String>(
       context: context,
       title: '管理本地字体',
       content: SizedBox(
@@ -891,7 +817,7 @@ AppLogger.error(logPrefixSettings, '下载失败 - $errorStr');
             return ListTile(
               leading: const Icon(Icons.font_download),
               title: Text(font.name),
-              subtitle: Text('ID: ${font.id.substring(0, 8)}... • ${font.fileExtension}'),
+              subtitle: Text('${font.fileExtension}'),
               trailing: IconButton(
                 icon: const Icon(Icons.delete_outline, color: Colors.red),
                 onPressed: () async {
@@ -902,14 +828,12 @@ AppLogger.error(logPrefixSettings, '下载失败 - $errorStr');
                     confirmText: '删除',
                     isDestructive: true,
                   );
-                  
                   if (confirmed == true) {
                     await FontManager.removeFont(font.id);
                     if (mounted) {
                       DialogHelper.showSuccessSnackBar(context, '已删除字体: ${font.name}');
-                      // 关闭对话框并重新打开
                       Navigator.pop(context);
-                      _manageLocalFonts(isChinese);
+                      _manageLocalFonts();
                     }
                   }
                 },
@@ -919,10 +843,59 @@ AppLogger.error(logPrefixSettings, '下载失败 - $errorStr');
         ),
       ),
     );
-    
-    // 管理完成后重新显示字体选择器
     if (mounted) {
-      _showFontPicker(context, isChinese);
+      _showFontPickerForField(context, 'displayFontId');
+    }
+  }
+
+  Widget _buildFontOption(BuildContext ctx, String id, String name, String curId) {
+    return ListTile(
+      leading: Icon(curId == id ? Icons.check_circle : Icons.circle_outlined,
+               color: curId == id ? Colors.green : Colors.grey),
+      title: Text(name),
+      subtitle: id == FontManager.defaultFontId ? const Text('系统默认字体') : null,
+      onTap: () => Navigator.pop(ctx, id),
+    );
+  }
+
+  Future<void> _saveLogLevel() async {
+    setState(() => _isLoadingLogLevel = true);
+    try {
+      AppLogger.setLogLevel(_selectedLogLevel);
+      await ref.read(settingsProvider.notifier).update((s) => s.copyWith(logLevel: _selectedLogLevel.name));
+      if (mounted) {
+        DialogHelper.showSuccessSnackBar(context, '日志级别已设置为: ${_selectedLogLevel.name.toUpperCase()}');
+      }
+    } catch (e) {
+      AppLogger.error(logPrefixSettings, '保存日志级别失败: $e');
+    } finally {
+      if (mounted) setState(() => _isLoadingLogLevel = false);
+    }
+  }
+
+  Future<void> _clearLogFile() async {
+    try {
+      if (kIsWeb) {
+        try {
+          await AppLogger.clearWebLogs();
+          if (mounted) DialogHelper.showSuccessSnackBar(context, 'Web日志已清空');
+        } catch (e) {
+          if (mounted) DialogHelper.showErrorSnackBar(context, '清空日志失败: $e');
+        }
+        return;
+      }
+      final logPath = await AppLogger.getConfiguredLogPath();
+      if (logPath != null) {
+        final file = File(logPath);
+        if (await file.exists()) {
+          await file.writeAsString('');
+          if (mounted) DialogHelper.showSuccessSnackBar(context, '日志文件已清空');
+        } else {
+          if (mounted) DialogHelper.showWarningSnackBar(context, '日志文件不存在');
+        }
+      }
+    } catch (e) {
+      if (mounted) DialogHelper.showErrorSnackBar(context, '清空日志文件失败: $e');
     }
   }
 
@@ -1062,25 +1035,16 @@ AppLogger.error(logPrefixSettings, '下载失败 - $errorStr');
                     controller: _savePathCtrl,
                     decoration: InputDecoration(
                       labelText: '保存路径',
-                      hintText: _isLoadingConfig ? '正在加载...' : '例如: /data/coinscape',
+                      hintText: '例如: /data/coinscape',
                       border: const OutlineInputBorder(),
                       prefixIcon: const Icon(Icons.folder_open),
-                      suffixIcon: _isLoadingConfig
-                          ? const Padding(
-                              padding: EdgeInsets.all(12),
-                              child: SizedBox(
-                                width: 20,
-                                height: 20,
-                                child: CircularProgressIndicator(strokeWidth: 2),
-                              ),
-                            )
-                          : null,
+                      suffixIcon: null,
                     ),
                   ),
                 ),
                 const SizedBox(width: 8),
                 ElevatedButton(
-                  onPressed: (_isSavingPath || _isLoadingConfig) ? null : _saveSavePath,
+                  onPressed: _isSavingPath ? null : _saveSavePath,
                   child: _isSavingPath
                       ? const SizedBox(
                           width: 20,
@@ -1255,7 +1219,7 @@ DialogHelper.showSuccessSnackBar(context, value ? '已启用后端代理' : '已
               // ===== 日志配置 =====
               _buildLogSettingsCard(),
 
-              // ===== PDF 字体配置 =====
+              // ===== 字体设置 =====
               _buildFontSettingsCard(context, settings),
 
               // ===== WebDAV 云同步配置 =====

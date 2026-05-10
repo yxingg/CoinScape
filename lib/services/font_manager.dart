@@ -66,7 +66,8 @@ class FontManager {
       _localFonts = fontsData.map((fontData) {
         final filename = fontData['filename'] as String;
         final fontId = fontData['id'] as String;
-        final name = fontId.replaceAll('_', ' ').replaceAll('custom', '自定义');
+        final lastDot = filename.lastIndexOf('.');
+        final name = lastDot != -1 ? filename.substring(0, lastDot) : filename;
         final ext = filename.toLowerCase().endsWith('.otf') ? 'otf' : 'ttf';
         
         return LocalFontInfo(
@@ -152,15 +153,14 @@ class FontManager {
             }
           } else {
             // 原生端：本地保存
-            // 使用文件名（移除扩展名）作为字体名
+            // 使用文件名（移除扩展名）作为字体ID和名称
             String fileName = file.name;
             final lastDot = fileName.lastIndexOf('.');
             if (lastDot != -1) {
               fileName = fileName.substring(0, lastDot);
             }
             
-            // 生成唯一ID
-            fontId = 'custom_${DateTime.now().millisecondsSinceEpoch}_${fontIds.length}';
+            fontId = fileName;
             final fileExtension = file.extension ?? 'ttf';
             
             // 保存字体文件

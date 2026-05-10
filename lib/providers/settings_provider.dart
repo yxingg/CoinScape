@@ -1,53 +1,153 @@
+import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../services/api_service.dart';
+import '../services/local_config_service.dart';
+import '../utils/logger.dart';
 
 class AppSettings {
-  final String chineseFontId;
-  final String englishFontId;
-  final String theme;
+  final String displayFontId;
+  final String pdfChineseFontId;
+  final String pdfEnglishFontId;
   final double fontSize;
   final String density;
+  final String theme;
+  final bool imageViewMode;
   final bool autoSave;
   final bool confirmDeletions;
+  final String backendUrl;
+  final String savePath;
+  final String logLevel;
+  final String webDavUrl;
+  final String webDavUser;
+  final String webDavPassword;
+  final bool webDavProxyEnabled;
 
   AppSettings({
-    required this.chineseFontId,
-    required this.englishFontId,
-    this.theme = 'system',
+    this.displayFontId = 'default',
+    this.pdfChineseFontId = 'default',
+    this.pdfEnglishFontId = 'default',
     this.fontSize = 14.0,
     this.density = 'comfortable',
+    this.theme = 'system',
+    this.imageViewMode = false,
     this.autoSave = true,
     this.confirmDeletions = true,
+    this.backendUrl = 'http://localhost:9876',
+    this.savePath = '',
+    this.logLevel = 'info',
+    this.webDavUrl = '',
+    this.webDavUser = '',
+    this.webDavPassword = '',
+    this.webDavProxyEnabled = true,
   });
 
   AppSettings copyWith({
-    String? chineseFontId,
-    String? englishFontId,
-    String? theme,
+    String? displayFontId,
+    String? pdfChineseFontId,
+    String? pdfEnglishFontId,
     double? fontSize,
     String? density,
+    String? theme,
+    bool? imageViewMode,
     bool? autoSave,
     bool? confirmDeletions,
+    String? backendUrl,
+    String? savePath,
+    String? logLevel,
+    String? webDavUrl,
+    String? webDavUser,
+    String? webDavPassword,
+    bool? webDavProxyEnabled,
   }) {
     return AppSettings(
-      chineseFontId: chineseFontId ?? this.chineseFontId,
-      englishFontId: englishFontId ?? this.englishFontId,
-      theme: theme ?? this.theme,
+      displayFontId: displayFontId ?? this.displayFontId,
+      pdfChineseFontId: pdfChineseFontId ?? this.pdfChineseFontId,
+      pdfEnglishFontId: pdfEnglishFontId ?? this.pdfEnglishFontId,
       fontSize: fontSize ?? this.fontSize,
       density: density ?? this.density,
+      theme: theme ?? this.theme,
+      imageViewMode: imageViewMode ?? this.imageViewMode,
       autoSave: autoSave ?? this.autoSave,
       confirmDeletions: confirmDeletions ?? this.confirmDeletions,
+      backendUrl: backendUrl ?? this.backendUrl,
+      savePath: savePath ?? this.savePath,
+      logLevel: logLevel ?? this.logLevel,
+      webDavUrl: webDavUrl ?? this.webDavUrl,
+      webDavUser: webDavUser ?? this.webDavUser,
+      webDavPassword: webDavPassword ?? this.webDavPassword,
+      webDavProxyEnabled: webDavProxyEnabled ?? this.webDavProxyEnabled,
     );
   }
 
-  /// 转换为后端API可用的格式
   Map<String, dynamic> toJson() {
+    return {
+      'displayFontId': displayFontId,
+      'pdfChineseFontId': pdfChineseFontId,
+      'pdfEnglishFontId': pdfEnglishFontId,
+      'fontSize': fontSize,
+      'density': density,
+      'theme': theme,
+      'imageViewMode': imageViewMode,
+      'autoSave': autoSave,
+      'confirmDeletions': confirmDeletions,
+      'backendUrl': backendUrl,
+      'savePath': savePath,
+      'logLevel': logLevel,
+      'webDavUrl': webDavUrl,
+      'webDavUser': webDavUser,
+      'webDavPassword': _encryptPassword(webDavPassword),
+      'webDavProxyEnabled': webDavProxyEnabled,
+    };
+  }
+
+  static AppSettings fromJson(Map<String, dynamic> json) {
+    return AppSettings(
+      displayFontId: json['displayFontId'] as String? ?? 'default',
+      pdfChineseFontId: json['pdfChineseFontId'] as String? ?? 'default',
+      pdfEnglishFontId: json['pdfEnglishFontId'] as String? ?? 'default',
+      fontSize: (json['fontSize'] as num?)?.toDouble() ?? 14.0,
+      density: json['density'] as String? ?? 'comfortable',
+      theme: json['theme'] as String? ?? 'system',
+      imageViewMode: json['imageViewMode'] as bool? ?? false,
+      autoSave: json['autoSave'] as bool? ?? true,
+      confirmDeletions: json['confirmDeletions'] as bool? ?? true,
+      backendUrl: json['backendUrl'] as String? ?? 'http://localhost:9876',
+      savePath: json['savePath'] as String? ?? '',
+      logLevel: json['logLevel'] as String? ?? 'info',
+      webDavUrl: json['webDavUrl'] as String? ?? '',
+      webDavUser: json['webDavUser'] as String? ?? '',
+      webDavPassword: _decryptPassword(json['webDavPassword'] as String? ?? ''),
+      webDavProxyEnabled: json['webDavProxyEnabled'] as bool? ?? true,
+    );
+  }
+
+  static String _encryptPassword(String plain) {
+    if (plain.isEmpty) return '';
+    try {
+      return 'enc:${base64Encode(utf8.encode(plain))}';
+    } catch (_) {
+      return plain;
+    }
+  }
+
+  static String _decryptPassword(String encrypted) {
+    if (encrypted.isEmpty || !encrypted.startsWith('enc:')) return encrypted;
+    try {
+      return utf8.decode(base64Decode(encrypted.substring(4)));
+    } catch (_) {
+      return encrypted;
+    }
+  }
+
+  Map<String, dynamic> toBackendJson() {
     return {
       'appearance': {
         'theme': theme,
-        'font_family': chineseFontId,
+        'display_font': displayFontId,
+        'pdf_chinese_font': pdfChineseFontId,
+        'pdf_english_font': pdfEnglishFontId,
         'font_size': fontSize,
         'density': density,
       },
@@ -58,14 +158,14 @@ class AppSettings {
     };
   }
 
-  /// 从后端API数据创建实例
-  static AppSettings fromJson(Map<String, dynamic> json) {
+  static AppSettings fromBackendJson(Map<String, dynamic> json) {
     final appearance = json['appearance'] as Map<String, dynamic>? ?? {};
     final behavior = json['behavior'] as Map<String, dynamic>? ?? {};
-    
+
     return AppSettings(
-      chineseFontId: appearance['font_family'] as String? ?? 'default',
-      englishFontId: appearance['font_family'] as String? ?? 'default', // 暂时使用相同字体
+      displayFontId: appearance['display_font'] as String? ?? 'default',
+      pdfChineseFontId: appearance['pdf_chinese_font'] as String? ?? 'default',
+      pdfEnglishFontId: appearance['pdf_english_font'] as String? ?? 'default',
       theme: appearance['theme'] as String? ?? 'system',
       fontSize: (appearance['font_size'] as num?)?.toDouble() ?? 14.0,
       density: appearance['density'] as String? ?? 'comfortable',
@@ -76,78 +176,67 @@ class AppSettings {
 }
 
 class SettingsNotifier extends StateNotifier<AppSettings> {
-  SettingsNotifier() : super(AppSettings(chineseFontId: 'default', englishFontId: 'default')) {
+  SettingsNotifier() : super(AppSettings()) {
     _loadSettings();
   }
 
   Future<void> _loadSettings() async {
     try {
-      // 首先尝试从后端API加载设置
+      final localData = await LocalConfigService.load();
+      if (localData.isNotEmpty) {
+        state = AppSettings.fromJson(localData);
+        AppLogger.info('Settings', '已从本地配置文件加载设置');
+        return;
+      }
+
       if (kIsWeb) {
-        final settingsData = await ApiService.getAppSettings();
-        state = AppSettings.fromJson(settingsData);
-        // 同时保存到本地缓存
-        final prefs = await SharedPreferences.getInstance();
-        await prefs.setString('chineseFontId', state.chineseFontId);
-        await prefs.setString('englishFontId', state.englishFontId);
+        try {
+          final settingsData = await ApiService.getAppSettings();
+          state = AppSettings.fromBackendJson(settingsData);
+          await LocalConfigService.save(state.toJson());
+        } catch (_) {
+          _loadFromPrefs();
+        }
       } else {
-        // 原生端：使用本地存储
-        final prefs = await SharedPreferences.getInstance();
-        state = AppSettings(
-          chineseFontId: prefs.getString('chineseFontId') ?? 'preset_noto_sans_sc',
-          englishFontId: prefs.getString('englishFontId') ?? 'preset_noto_sans_sc',
-        );
+        _loadFromPrefs();
       }
-    } catch (e) {
-      // 如果加载失败，使用默认值
-      // print('Failed to load settings: $e');
-      final prefs = await SharedPreferences.getInstance();
-      state = AppSettings(
-        chineseFontId: prefs.getString('chineseFontId') ?? 'preset_noto_sans_sc',
-        englishFontId: prefs.getString('englishFontId') ?? 'preset_noto_sans_sc',
-      );
+    } catch (_) {
+      _loadFromPrefs();
     }
   }
 
-  Future<void> setChineseFont(String fontId) async {
-    if (kIsWeb) {
-      try {
-        await ApiService.updateSettingsCategory('appearance', {'font_family': fontId});
-      } catch (e) {
-        // print('Failed to save font to backend: $e');
-      }
-    }
-    
+  Future<void> _loadFromPrefs() async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('chineseFontId', fontId);
-    state = state.copyWith(chineseFontId: fontId);
+    state = AppSettings(
+      displayFontId: prefs.getString('displayFontId') ?? 'default',
+      pdfChineseFontId: prefs.getString('pdfChineseFontId') ?? 'default',
+      pdfEnglishFontId: prefs.getString('pdfEnglishFontId') ?? 'default',
+      fontSize: prefs.getDouble('fontSize') ?? 14.0,
+      density: prefs.getString('density') ?? 'comfortable',
+      theme: prefs.getString('theme') ?? 'system',
+      imageViewMode: prefs.getBool('imageViewMode') ?? false,
+      backendUrl: prefs.getString('backendUrl') ?? 'http://localhost:9876',
+      savePath: prefs.getString('savePath') ?? '',
+      logLevel: prefs.getString('logLevel') ?? 'info',
+      webDavUrl: prefs.getString('webDavUrl') ?? '',
+      webDavUser: prefs.getString('webDavUser') ?? '',
+      webDavPassword: prefs.getString('webDavPassword') ?? '',
+      webDavProxyEnabled: prefs.getBool('webDavProxyEnabled') ?? true,
+    );
   }
 
-  Future<void> setEnglishFont(String fontId) async {
+  Future<void> _save() async {
+    await LocalConfigService.save(state.toJson());
     if (kIsWeb) {
       try {
-        // 英文字体也需要保存，但目前API只支持一个主字体
-        // 我们可以将英文字体保存在其他字段
-        await ApiService.updateSettingsCategory('appearance', {'font_family': fontId});
-      } catch (e) {
-        // print('Failed to save font to backend: $e');
-      }
+        await ApiService.updateAppSettings(state.toBackendJson());
+      } catch (_) {}
     }
-    
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('englishFontId', fontId);
-    state = state.copyWith(englishFontId: fontId);
   }
 
-  Future<void> updateAppSettings(Map<String, dynamic> updates) async {
-    if (kIsWeb) {
-      try {
-        final settingsData = await ApiService.updateAppSettings(updates);
-        state = AppSettings.fromJson(settingsData['settings']);
-      } catch (e) {
-        // print('Failed to update settings on backend: $e');
-      }
-    }
+  Future<void> update(AppSettings Function(AppSettings) updater) async {
+    state = updater(state);
+    await _save();
   }
 }
 

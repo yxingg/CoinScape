@@ -134,8 +134,8 @@ class _SeriesListDrawerState extends ConsumerState<SeriesListDrawer> {
           body: PdfPreview(
             build: (format) => generateCoinsPdf(
               allPdfCoins,
-              chineseFontId: settings.chineseFontId,
-              englishFontId: settings.englishFontId,
+              chineseFontId: settings.pdfChineseFontId,
+              englishFontId: settings.pdfEnglishFontId,
               seriesSections: seriesSections,
             ),
             allowSharing: true,
@@ -319,7 +319,12 @@ class _SeriesListDrawerState extends ConsumerState<SeriesListDrawer> {
                             ),
                       title: Text(series.name, style: const TextStyle(fontWeight: FontWeight.w500)),
                       subtitle: series.description?.isNotEmpty == true
-                          ? Text(series.description!, maxLines: 1, overflow: TextOverflow.ellipsis)
+                          ? Text(
+                              series.description!,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                            )
                           : null,
                       onTap: () {
                         if (_isSelectionMode) {

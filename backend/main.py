@@ -532,10 +532,16 @@ async def upload_font(file: UploadFile = File(...)):
     if ext not in ['.ttf', '.otf']:
         ext = '.ttf'  # 默认使用.ttf
     
-    # 生成唯一ID：使用原始文件名 + 时间戳
-    font_id = f"{name_without_ext}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    # 使用原始文件名（不含扩展名）作为字体ID
+    font_id = name_without_ext
     
+    # 如果已存在同名字体，添加序号后缀避免覆盖
     filepath = os.path.join(db.FONTS_DIR, f"{font_id}{ext}")
+    counter = 1
+    while os.path.isfile(filepath):
+        font_id = f"{name_without_ext}_{counter}"
+        filepath = os.path.join(db.FONTS_DIR, f"{font_id}{ext}")
+        counter += 1
     
     content = await file.read()
     with open(filepath, "wb") as f:

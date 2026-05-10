@@ -32,7 +32,7 @@ class CoinListScreen extends ConsumerStatefulWidget {
 
 class _CoinListScreenState extends ConsumerState<CoinListScreen> {
   bool _isSelectionMode = false;
-  bool _imageView = false;
+  late bool _imageView;
   final Set<String> _selectedCoinIds = {};
   final ScrollController _scrollController = ScrollController();
   int _currentTimelineIndex = 0;
@@ -52,6 +52,7 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
   @override
   void initState() {
     super.initState();
+    _imageView = ref.read(settingsProvider).imageViewMode;
     _scrollController.addListener(_onScrollChanged);
   }
 
@@ -583,7 +584,11 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
           title: Text(selectedSeries?.name ?? '全部纪念币'),
           actions: [
             IconButton(
-              onPressed: () => setState(() => _imageView = !_imageView),
+              onPressed: () {
+                final newValue = !_imageView;
+                setState(() => _imageView = newValue);
+                ref.read(settingsProvider.notifier).update((s) => s.copyWith(imageViewMode: newValue));
+              },
               icon: Icon(_imageView ? Icons.view_list : Icons.grid_view),
               tooltip: _imageView ? '切换到详细信息' : '切换到图片展示',
             ),
@@ -617,7 +622,11 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
         title: Text(selectedSeries?.name ?? '全部纪念币'),
         actions: [
           IconButton(
-            onPressed: () => setState(() => _imageView = !_imageView),
+            onPressed: () {
+                final newValue = !_imageView;
+                setState(() => _imageView = newValue);
+                ref.read(settingsProvider.notifier).update((s) => s.copyWith(imageViewMode: newValue));
+              },
             icon: Icon(_imageView ? Icons.view_list : Icons.grid_view),
             tooltip: _imageView ? '切换到详细信息' : '切换到图片展示',
           ),
@@ -977,8 +986,8 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
           body: PdfPreview(
             build: (format) => generateCoinsPdf(
               selectedCoins,
-              chineseFontId: settings.chineseFontId,
-              englishFontId: settings.englishFontId,
+              chineseFontId: settings.pdfChineseFontId,
+              englishFontId: settings.pdfEnglishFontId,
               seriesSections: seriesSections,
             ),
             allowSharing: true,
