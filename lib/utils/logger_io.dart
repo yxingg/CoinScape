@@ -82,9 +82,22 @@ class LogConfig {
   
   /// 清空日志文件（非Web平台）
   static Future<void> clearWebLogs() async {
-    // 对于非Web平台，这是一个空实现
-    // 对于移动/桌面平台，日志文件存储在文件系统中，需要不同的清理方式
+    // 对于非Web平台，这个方法保持空实现以兼容 Web stub 的调用。
     return;
+  }
+
+  /// 清空日志文件（本地平台实现）
+  static Future<void> clearLogs() async {
+    try {
+      final path = await getConfiguredLogPath();
+      if (path == null) return;
+      final file = io.File(path);
+      if (await file.exists()) {
+        await file.writeAsString('');
+      }
+    } catch (e) {
+      // 忽略清理失败
+    }
   }
 }
 

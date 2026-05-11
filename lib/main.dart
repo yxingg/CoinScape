@@ -7,6 +7,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'screens/home_screen.dart';
+import 'screens/login_screen.dart';
+import 'providers/auth_provider.dart';
 import 'providers/sync_providers.dart';
 import 'providers/font_family_provider.dart';
 import 'utils/logger.dart';
@@ -82,12 +84,13 @@ class CoinManagerApp extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     // 监听字体主题变化
     final theme = ref.watch(appThemeWithFontProvider);
+    final auth = ref.watch(authProvider);
     
     return MaterialApp(
       title: '纪念币收藏管理',
       debugShowCheckedModeBanner: false,
       theme: theme,
-      home: const HomeScreen(),
+      home: auth.loggedIn ? const HomeScreen() : const LoginScreen(),
     );
   }
 }

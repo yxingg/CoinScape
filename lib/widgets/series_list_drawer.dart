@@ -11,6 +11,7 @@ import '../utils/pdf_helper.dart';
 import '../providers/settings_provider.dart';
 import '../services/sync_service.dart';
 import 'package:printing/printing.dart';
+import '../providers/auth_provider.dart';
 
 class SeriesListDrawer extends ConsumerStatefulWidget {
   final VoidCallback? onClose;
@@ -455,14 +456,31 @@ class _SeriesListDrawerState extends ConsumerState<SeriesListDrawer> {
 
     return Padding(
       padding: const EdgeInsets.all(16.0),
-      child: FilledButton.icon(
-        onPressed: () => _showAddOrEditDialog(context),
-        icon: const Icon(Icons.add),
-        label: const Text('添加新系列'),
-        style: FilledButton.styleFrom(
-          minimumSize: const Size(double.infinity, 48),
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-        ),
+      child: Column(
+        children: [
+          FilledButton.icon(
+            onPressed: () => _showAddOrEditDialog(context),
+            icon: const Icon(Icons.add),
+            label: const Text('添加新系列'),
+            style: FilledButton.styleFrom(
+              minimumSize: const Size(double.infinity, 48),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            ),
+          ),
+          const SizedBox(height: 8),
+          OutlinedButton.icon(
+            onPressed: () async {
+              await ref.read(authProvider.notifier).logout();
+            },
+            icon: const Icon(Icons.logout, color: Colors.redAccent),
+            label: const Text('登出', style: TextStyle(color: Colors.redAccent)),
+            style: OutlinedButton.styleFrom(
+              side: const BorderSide(color: Colors.redAccent),
+              minimumSize: const Size(double.infinity, 44),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            ),
+          ),
+        ],
       ),
     );
   }

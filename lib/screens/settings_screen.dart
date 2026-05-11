@@ -1,4 +1,3 @@
-import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -7,6 +6,7 @@ import 'package:drift/drift.dart' as drift;
 import '../providers/settings_provider.dart';
 import '../providers/sync_providers.dart';
 import '../providers/coin_providers.dart';
+import '../providers/auth_provider.dart';
 import '../services/sync_service.dart';
 import '../services/api_service.dart';
 import '../services/font_manager.dart';
@@ -29,6 +29,14 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   late TextEditingController _pwdCtrl;
   late TextEditingController _backendUrlCtrl;
   late TextEditingController _savePathCtrl;
+  // Account management controllers
+  late TextEditingController _acctUserCtrl;
+  late TextEditingController _acctCurrentPwdCtrl;
+  late TextEditingController _acctNewPwdCtrl;
+  late TextEditingController _acctConfirmPwdCtrl;
+  String _storedAuthUsername = '';
+  bool _isChangingPassword = false;
+  String? _acctError;
 
   bool _isSyncing = false;
   bool _isBackendConnected = false;
@@ -47,6 +55,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     _pwdCtrl = TextEditingController();
     _backendUrlCtrl = TextEditingController(text: ApiService.baseUrl);
     _savePathCtrl = TextEditingController();
+    _acctUserCtrl = TextEditingController();
+    _acctCurrentPwdCtrl = TextEditingController();
+    _acctNewPwdCtrl = TextEditingController();
+    _acctConfirmPwdCtrl = TextEditingController();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _loadSettingsToUI();
       _checkBackendConnection();
@@ -59,7 +71,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     _savePathCtrl.text = settings.savePath;
     _urlCtrl.text = settings.webDavUrl;
     _userCtrl.text = settings.webDavUser;
-    _pwdCtrl.text = settings.webDavPassword;
+    // For security, do not prefill the password field. User must re-enter to change.
+    _pwdCtrl.text = '';
 
     final level = LogLevel.values.firstWhere(
       (e) => e.name == settings.logLevel,
@@ -67,6 +80,23 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     );
     setState(() => _selectedLogLevel = level);
     AppLogger.setLogLevel(level);
+
+    // Load auth username from backend settings if possible
+    _loadAuthUsername();
+  }
+
+  Future<void> _loadAuthUsername() async {
+    try {
+      final map = await ApiService.getAppSettings();
+      final auth = map['auth'] as Map<String, dynamic>?;
+      final user = auth != null && auth['username'] is String ? auth['username'] as String : '';
+      setState(() {
+        _acctUserCtrl.text = user;
+        _storedAuthUsername = user;
+      });
+    } catch (_) {
+      // ignore
+    }
   }
 
   @override
@@ -76,8 +106,76 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     _pwdCtrl.dispose();
     _backendUrlCtrl.dispose();
     _savePathCtrl.dispose();
+    _acctUserCtrl.dispose();
+    _acctCurrentPwdCtrl.dispose();
+    _acctNewPwdCtrl.dispose();
+    _acctConfirmPwdCtrl.dispose();
     
     super.dispose();
+  }
+
+  Future<void> _changeAccount() async {
+    final newUser = _acctUserCtrl.text.trim();
+    final curPwd = _acctCurrentPwdCtrl.text;
+    final newPwd = _acctNewPwdCtrl.text;
+    final confirm = _acctConfirmPwdCtrl.text;
+
+    if (curPwd.isEmpty) {
+      setState(() => _acctError = '请输入当前密码以确认身份');
+      return;
+    }
+    if (newPwd.isNotEmpty && newPwd != confirm) {
+      setState(() => _acctError = '两次新密码输入不一致');
+      return;
+    }
+
+    setState(() {
+      _isChangingPassword = true;
+      _acctError = null;
+    });
+
+    try {
+      // verify current credentials
+      final ok = await ApiService.login(_storedAuthUsername, curPwd);
+      if (!ok) {
+        setState(() {
+          _acctError = '当前密码错误';
+          _isChangingPassword = false;
+        });
+        return;
+      }
+
+      final Map<String, dynamic> payload = {'auth': {}};
+      if (newUser.isNotEmpty && newUser != _storedAuthUsername) {
+        payload['auth']['username'] = newUser;
+      }
+      if (newPwd.isNotEmpty) {
+        payload['auth']['password'] = newPwd;
+      }
+
+      if ((payload['auth'] as Map).isEmpty) {
+        setState(() {
+          _acctError = '未检测到变更';
+          _isChangingPassword = false;
+        });
+        return;
+      }
+
+      final res = await ApiService.updateAppSettings(payload);
+      if (res['success'] == true) {
+        // force logout to require re-login with new credentials
+        await ref.read(authProvider.notifier).logout();
+        if (mounted) {
+          DialogHelper.showSuccessSnackBar(context, '账户已更新，请重新登录');
+        }
+      } else {
+        setState(() => _acctError = '更新失败');
+      }
+    } catch (e) {
+      setState(() => _acctError = '更新失败: $e');
+    } finally {
+      if (mounted) setState(() => _isChangingPassword = false);
+    }
   }
 
   Future<void> _checkBackendConnection() async {
@@ -139,12 +237,11 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       final url = _urlCtrl.text.trim();
       final user = _userCtrl.text.trim();
       final pwd = _pwdCtrl.text.trim();
-      
       await ref.read(webDavConfigProvider.notifier).saveConfig(url, user, pwd);
       await ref.read(settingsProvider.notifier).update((s) => s.copyWith(
         webDavUrl: url,
         webDavUser: user,
-        webDavPassword: pwd,
+        webDavPassword: pwd.isNotEmpty ? pwd : s.webDavPassword,
       ));
       if (mounted) {
         DialogHelper.showSuccessSnackBar(context, '配置已保存');
@@ -158,14 +255,12 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
   Future<void> _push() async {
     if (!ref.read(webDavConfigProvider).isValid) {
-       AppLogger.warning(logPrefixSettings, 'WebDAV 未配置');
-       AppLogger.info(logPrefixSettings, 'WebDAV 未配置'); // 调试输出
+      AppLogger.warning(logPrefixSettings, 'WebDAV 未配置');
        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('请先配置并保存 WebDAV')));
        return;
     }
     setState(() => _isSyncing = true);
     AppLogger.info(logPrefixSettings, '开始 WebDAV 上传...');
-    AppLogger.info(logPrefixSettings, '开始 WebDAV 上传...'); // 调试输出
     try {
       final repo = ref.read(coinRepositoryProvider);
       final series = await repo.getAllSeries();
@@ -189,13 +284,11 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       }
 
       AppLogger.info(logPrefixSettings, '数据汇总: ${series.length} 个业务, ${coins.length} 枚纪念币');
-      AppLogger.info(logPrefixSettings, '数据汇总: ${series.length} 个业务, ${coins.length} 枚纪念币'); // 调试输出
       final service = _getService();
-      AppLogger.info(logPrefixSettings, '调用 service.pushBackup()...'); // 调试输出
+      AppLogger.info(logPrefixSettings, '调用 service.pushBackup()...');
       await service.pushBackup(series, coins, links, coinImages, seriesImages);
       
       AppLogger.info(logPrefixSettings, 'WebDAV 上传成功');
-      AppLogger.info(logPrefixSettings, 'WebDAV 上传成功'); // 调试输出
       if (mounted) {
         DialogHelper.showSuccessSnackBar(context, '推送(上传)成功！');
       }
@@ -214,7 +307,7 @@ AppLogger.error(logPrefixSettings, '上传失败 - $errorStr');
       }
     } finally {
       if (mounted) setState(() => _isSyncing = false);
-      AppLogger.info(logPrefixSettings, '上传操作完成'); // 调试输出
+      AppLogger.info(logPrefixSettings, '上传操作完成');
     }
   }
 
@@ -489,6 +582,74 @@ AppLogger.error(logPrefixSettings, '下载失败 - $errorStr');
                   ),
                   
                   const SizedBox(height: 8),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildAccountCard() {
+    return Card(
+      elevation: 2,
+      margin: const EdgeInsets.only(bottom: 24),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 8.0),
+        child: Column(
+          children: [
+            const ListTile(
+              title: Text('账户管理', style: TextStyle(fontWeight: FontWeight.bold)),
+              subtitle: Text('修改登录用户名或密码'),
+              leading: Icon(Icons.person),
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16.0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  TextFormField(
+                    controller: _acctUserCtrl,
+                    decoration: const InputDecoration(labelText: '用户名'),
+                    textInputAction: TextInputAction.next,
+                  ),
+                  const SizedBox(height: 8),
+                  TextFormField(
+                    controller: _acctCurrentPwdCtrl,
+                    decoration: const InputDecoration(labelText: '当前密码'),
+                    obscureText: true,
+                    textInputAction: TextInputAction.next,
+                  ),
+                  const SizedBox(height: 8),
+                  TextFormField(
+                    controller: _acctNewPwdCtrl,
+                    decoration: const InputDecoration(labelText: '新密码（留空则不修改）'),
+                    obscureText: true,
+                    textInputAction: TextInputAction.next,
+                  ),
+                  const SizedBox(height: 8),
+                  TextFormField(
+                    controller: _acctConfirmPwdCtrl,
+                    decoration: const InputDecoration(labelText: '确认新密码'),
+                    obscureText: true,
+                    textInputAction: TextInputAction.done,
+                  ),
+                  const SizedBox(height: 12),
+                  if (_acctError != null) ...[
+                    Text(_acctError!, style: const TextStyle(color: Colors.red)),
+                    const SizedBox(height: 8),
+                  ],
+                  SizedBox(
+                    width: double.infinity,
+                    child: FilledButton.icon(
+                      onPressed: _isChangingPassword ? null : _changeAccount,
+                      icon: _isChangingPassword
+                          ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                          : const Icon(Icons.save),
+                      label: Text(_isChangingPassword ? '保存中...' : '保存账户'),
+                    ),
+                  ),
                 ],
               ),
             ),
@@ -788,11 +949,10 @@ AppLogger.error(logPrefixSettings, '下载失败 - $errorStr');
 
   Future<void> _importLocalFonts() async {
     final fontIds = await FontManager.pickAndSaveCustomFonts();
-    if (fontIds.isNotEmpty && mounted) {
+      if (fontIds.isNotEmpty && mounted) {
       DialogHelper.showSuccessSnackBar(context, '已导入 ${fontIds.length} 个字体文件');
       await Future.delayed(const Duration(milliseconds: 500));
       if (mounted) {
-        final settings = ref.read(settingsProvider);
         _showFontPickerForField(context, 'displayFontId');
       }
     }
@@ -886,13 +1046,14 @@ AppLogger.error(logPrefixSettings, '下载失败 - $errorStr');
       }
       final logPath = await AppLogger.getConfiguredLogPath();
       if (logPath != null) {
-        final file = File(logPath);
-        if (await file.exists()) {
-          await file.writeAsString('');
+        try {
+          await AppLogger.clearLogs();
           if (mounted) DialogHelper.showSuccessSnackBar(context, '日志文件已清空');
-        } else {
-          if (mounted) DialogHelper.showWarningSnackBar(context, '日志文件不存在');
+        } catch (e) {
+          if (mounted) DialogHelper.showErrorSnackBar(context, '清空日志失败: $e');
         }
+      } else {
+        if (mounted) DialogHelper.showWarningSnackBar(context, '无法获取日志路径');
       }
     } catch (e) {
       if (mounted) DialogHelper.showErrorSnackBar(context, '清空日志文件失败: $e');
@@ -1218,6 +1379,9 @@ DialogHelper.showSuccessSnackBar(context, value ? '已启用后端代理' : '已
 
               // ===== 日志配置 =====
               _buildLogSettingsCard(),
+
+                // ===== 账户管理 =====
+                _buildAccountCard(),
 
               // ===== 字体设置 =====
               _buildFontSettingsCard(context, settings),

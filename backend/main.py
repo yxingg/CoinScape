@@ -31,6 +31,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 
 import database as db
+import crypto
 
 _script_dir = os.path.dirname(os.path.abspath(__file__))
 
@@ -49,7 +50,21 @@ def setup_logging() -> None:
     os.makedirs(LOG_DIR, exist_ok=True)
 
     root_logger = logging.getLogger()
-    root_logger.setLevel(logging.DEBUG)  # 临时设置为DEBUG以排查问题
+    # 从应用设置读取日志级别（默认 INFO）
+    try:
+        app_settings = db.load_app_settings()
+        lvl = app_settings.get("backend", {}).get("log_level", "INFO")
+    except Exception:
+        lvl = "INFO"
+    level_map = {
+        "DEBUG": logging.DEBUG,
+        "INFO": logging.INFO,
+        "WARNING": logging.WARNING,
+        "ERROR": logging.ERROR,
+        "CRITICAL": logging.CRITICAL,
+    }
+    chosen_level = level_map.get(str(lvl).upper(), logging.INFO)
+    root_logger.setLevel(chosen_level)
 
     # 自定义Formatter，包含模块前缀
     class CoinScapeFormatter(logging.Formatter):
@@ -91,7 +106,7 @@ def setup_logging() -> None:
             maxBytes=10 * 1024 * 1024,  # 10MB
             backupCount=5
         )
-        file_handler.setLevel(logging.INFO)
+        file_handler.setLevel(chosen_level)
         file_handler.setFormatter(formatter)
     except Exception as e:
         # 如果文件日志失败，只使用控制台
@@ -100,7 +115,7 @@ def setup_logging() -> None:
 
     # 控制台处理器
     console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.INFO)
+    console_handler.setLevel(chosen_level)
     console_handler.setFormatter(formatter)
 
     # 清除现有处理器，添加新的
@@ -112,13 +127,13 @@ def setup_logging() -> None:
 
     # 为coinscape日志器设置额外配置
     app_logger = logging.getLogger("coinscape")
-    app_logger.setLevel(logging.INFO)
+    app_logger.setLevel(chosen_level)
     
     # 设置全局异常钩子
     import sys
     sys.excepthook = _handle_uncaught_exception
     
-    app_logger.info("日志系统初始化完成")
+    app_logger.info("日志系统初始化完成 (level=%s)", logging.getLevelName(chosen_level))
     if file_handler:
         app_logger.info("日志文件路径: %s", os.path.abspath(LOG_FILE_PATH))
     else:
@@ -210,26 +225,6 @@ async def health_check():
     return {"status": "ok", "save_path": db.SAVE_PATH}
 
 
-@app.get("/api/config")
-async def get_config():
-    return {
-        "save_path": db.SAVE_PATH,
-        "config_file": db.CONFIG_PATH,
-    }
-
-
-@app.put("/api/config")
-async def update_config(data: dict = Body(...)):
-    """Update backend config (save_path, etc.). Requires restart to take effect."""
-    cfg = db.load_config()
-    if "save_path" in data:
-        cfg["save_path"] = data["save_path"]
-    db.save_config(cfg)
-    return {
-        "success": True,
-        "message": "配置已保存，重启服务器后生效",
-        "save_path": cfg.get("save_path", db.SAVE_PATH),
-    }
 
 
 # ============================================================
@@ -576,6 +571,26 @@ async def get_settings():
     return db.load_app_settings()
 
 
+@app.post("/api/auth/login")
+async def auth_login(data: dict = Body(...)):
+    """Simple authentication endpoint: verify username/password against stored hash."""
+    username = data.get('username')
+    password = data.get('password')
+    if not username or not password:
+        raise HTTPException(status_code=400, detail="username and password required")
+
+    settings = db.load_app_settings()
+    auth = settings.get('auth', {}) if isinstance(settings, dict) else {}
+    stored_user = auth.get('username')
+    stored_hash = auth.get('password_hash')
+    if not stored_user or not stored_hash:
+        raise HTTPException(status_code=500, detail="Authentication not configured")
+
+    if username == stored_user and crypto.verify_password(password, stored_hash):
+        return {"success": True}
+    raise HTTPException(status_code=401, detail="Invalid credentials")
+
+
 @app.put("/api/settings")
 async def update_settings(data: dict = Body(...)):
     """Update application settings."""
@@ -629,18 +644,45 @@ async def import_data(data: dict = Body(...)):
 # 使用app.add_route来支持任意HTTP方法
 # FastAPI的api_route可能对非标准方法支持有限
 async def proxy_webdav_handler(request: Request):
+    # Check whether proxy is enabled in settings
+    try:
+        settings = db.load_app_settings()
+        backend_cfg = settings.get('backend', {}) if isinstance(settings, dict) else {}
+        proxy_enabled = backend_cfg.get('proxy_enabled') if isinstance(backend_cfg, dict) else None
+        if proxy_enabled in (False, None):
+            # Also fallback to sync.webdav.enabled
+            sync_cfg = settings.get('sync', {}) if isinstance(settings, dict) else {}
+            webdav = sync_cfg.get('webdav', {}) if isinstance(sync_cfg, dict) else {}
+            proxy_enabled = webdav.get('enabled', False)
+    except Exception:
+        proxy_enabled = False
+
+    # If proxy is disabled, log and continue to proxy the request
+    if not proxy_enabled:
+        logger = logging.getLogger("coinscape.proxy")
+        logger.info("Proxy is disabled in settings, but forwarding request to target to avoid client errors.")
+
     return await proxy_webdav_impl(request)
 
 # 为每个WebDAV方法注册路由
 # 使用路径参数来捕获WebDAV路径：/api/proxy/webdav/{webdav_path:path}
 webdav_methods = ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PROPFIND", "PROPPATCH", "MKCOL", "COPY", "MOVE", "LOCK", "UNLOCK"]
 
-# 两个版本的路由：带路径参数和不带
-for method in webdav_methods:
-    # 版本1：带WebDAV路径参数
-    app.add_route("/api/proxy/webdav/{webdav_path:path}", proxy_webdav_handler, methods=[method])
-    # 版本2：不带路径参数（兼容旧格式）
-    app.add_route("/api/proxy/webdav", proxy_webdav_handler, methods=[method])
+# 根据设置决定是否在启动时注册代理路由（禁用时不注册，需重启生效）
+try:
+    settings_for_routes = db.load_app_settings()
+    backend_cfg_for_routes = settings_for_routes.get('backend', {}) if isinstance(settings_for_routes, dict) else {}
+    register_proxy = backend_cfg_for_routes.get('proxy_enabled', False) or settings_for_routes.get('sync', {}).get('webdav', {}).get('enabled', False)
+except Exception:
+    register_proxy = False
+
+if register_proxy:
+    for method in webdav_methods:
+        app.add_route("/api/proxy/webdav/{webdav_path:path}", proxy_webdav_handler, methods=[method])
+        app.add_route("/api/proxy/webdav", proxy_webdav_handler, methods=[method])
+else:
+    logger = logging.getLogger("coinscape.proxy")
+    logger.info("WebDAV proxy routes not registered (disabled in settings). Restart required to change this.)")
 
 # 实际的代理实现函数
 async def proxy_webdav_impl(request: Request):
@@ -903,6 +945,20 @@ async def startup():
     print(f"  Fonts: {db.FONTS_DIR}")
     if os.path.isdir(_web_build_dir):
         print(f"  Web static: {_web_build_dir}")
+    try:
+        settings = db.load_app_settings()
+        backend_cfg = settings.get("backend", {})
+        svc = backend_cfg.get("service_address")
+        lvl = backend_cfg.get("log_level")
+        proxy_enabled = backend_cfg.get("proxy_enabled")
+        if svc:
+            print(f"  Backend service address: {svc}")
+        if lvl:
+            print(f"  Backend log level: {lvl}")
+        if proxy_enabled is not None:
+            print(f"  Backend proxy enabled: {proxy_enabled}")
+    except Exception:
+        pass
 
 
 # ============================================================

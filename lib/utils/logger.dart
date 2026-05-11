@@ -173,9 +173,19 @@ class AppLogger {
       name: prefix,
     );
 
-    // 总是打印到控制台用于调试
-    print('🎯 LOG [$levelStr]: $logMessage');
+    // 总是打印到控制台用于调试（使用 debugPrint 避免 analyzer 的 avoid_print 警告）
+    debugPrint('🎯 LOG [$levelStr]: $logMessage');
     unawaited(platform.appendLog(logMessage));
+  }
+
+  /// 清空当前平台的日志（Web/Native 都支持）
+  static Future<void> clearLogs() async {
+    try {
+      await platform.LogConfig.clearLogs();
+    } catch (e) {
+      error(logPrefixApp, '清空日志失败: $e');
+      rethrow;
+    }
   }
 
   /// 将 LogLevel 转换为 dart:developer 的日志级别

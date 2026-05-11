@@ -14,6 +14,7 @@ import 'coin_edit_screen.dart';
 import 'settings_screen.dart';
 import '../utils/export_helper.dart';
 import '../utils/pdf_helper.dart';
+import '../utils/logger.dart';
 import '../services/sync_service.dart';
 import '../providers/sync_providers.dart';
 import '../models/sync_models.dart';
@@ -515,7 +516,7 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
     // 独立 Fab
     Widget? fab = FloatingActionButton.extended(
             onPressed: () {
-               debugPrint('FAB Clicked! Navigating to CoinEditScreen for series: ${selectedSeries?.id}');
+               AppLogger.methodCall('CoinListScreen', 'onFabPressed', params: {'seriesId': selectedSeries?.id});
                Navigator.push(context, MaterialPageRoute(
                  builder: (ctx) => CoinEditScreen(seriesId: selectedSeries?.id),
                ));
@@ -1060,7 +1061,7 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
       }
       
     } catch (e) {
-      debugPrint(e.toString());
+      AppLogger.error(logPrefixUI, '导出失败: $e');
       // 关闭进度条
       if (progressController != null) {
         ScaffoldMessenger.of(context).hideCurrentSnackBar();
@@ -1085,6 +1086,7 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
           title: '云端备份 (Push)',
           subtitle: '将本地数据上传到云端',
           onTap: () {
+            if (_isSyncing) return;
             Navigator.pop(context);
             _pushToCloud();
           },
@@ -1095,6 +1097,7 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
           title: '拉取合并 (Pull)',
           subtitle: '从云端下载并合并到本地',
           onTap: () {
+            if (_isSyncing) return;
             Navigator.pop(context);
             _pullFromCloud();
           },

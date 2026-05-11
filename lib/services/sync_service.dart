@@ -165,15 +165,13 @@ class SyncService {
   ) async {
     final c = client;
     AppLogger.info(logPrefixSync, '尝试连接到 WebDAV 服务器: $_finalUrl');
-    print('SYNC DEBUG: 尝试连接到 WebDAV 服务器: $_finalUrl'); // 调试输出
+    AppLogger.debug(logPrefixSync, '尝试连接到 WebDAV 服务器: $_finalUrl');
     
     try {
       // 先尝试连接和验证
       AppLogger.debug(logPrefixSync, '验证 WebDAV 连接...');
-      print('SYNC DEBUG: 验证 WebDAV 连接...'); // 调试输出
       await c.readProps('/');
       AppLogger.info(logPrefixSync, 'WebDAV 连接验证成功');
-      print('SYNC DEBUG: WebDAV 连接验证成功'); // 调试输出
     } catch (e, st) {
       AppLogger.error(logPrefixSync, 'WebDAV 连接验证失败: $e', st);
       rethrow;
@@ -182,18 +180,14 @@ class SyncService {
     final zipData = await generateBackupDataBytes(series, coins, links, coinImages, seriesImages);
     const remotePath = '/latest_backup.ccm';
     AppLogger.info(logPrefixSync, '开始上传 WebDAV 备份到 $remotePath, 大小: ${zipData.length} bytes');
-    print('SYNC DEBUG: 开始上传 WebDAV 备份到 $remotePath, 大小: ${zipData.length} bytes'); // 调试输出
     
     try {
       AppLogger.debug(logPrefixSync, '执行 WebDAV write: $remotePath');
-      print('SYNC DEBUG: 执行 WebDAV write: $remotePath'); // 调试输出
       await c.write(remotePath, zipData);
 
       AppLogger.debug(logPrefixSync, '写入完成，开始校验远端文件是否存在');
-      print('SYNC DEBUG: 写入完成，开始校验远端文件是否存在'); // 调试输出
       final remoteFile = await c.readProps(remotePath);
       AppLogger.info(logPrefixSync, '远端文件校验成功: ${remoteFile.path}');
-      print('SYNC DEBUG: 远端文件校验成功: ${remoteFile.path}'); // 调试输出
     } catch (e, st) {
       // 检查错误类型以提供更有用的信息
       final errorMessage = e.toString().toLowerCase();
@@ -210,8 +204,6 @@ class SyncService {
       }
       
       AppLogger.error(logPrefixSync, detailedMessage, st);
-      print('SYNC DEBUG ERROR: $detailedMessage'); // 调试输出
-      print('SYNC DEBUG ERROR STACK: $st'); // 调试输出
       rethrow;
     }
   }
@@ -219,15 +211,13 @@ class SyncService {
   Future<SyncData> pullBackup() async {
     final c = client;
     AppLogger.info(logPrefixSync, '尝试连接到 WebDAV 服务器: $_finalUrl');
-    print('SYNC DEBUG: 尝试连接到 WebDAV 服务器: $_finalUrl'); // 调试输出
+    AppLogger.debug(logPrefixSync, '尝试连接到 WebDAV 服务器: $_finalUrl');
     
     try {
       // 先尝试连接和验证
       AppLogger.debug(logPrefixSync, '验证 WebDAV 连接...');
-      print('SYNC DEBUG: 验证 WebDAV 连接...'); // 调试输出
       await c.readProps('/');
       AppLogger.info(logPrefixSync, 'WebDAV 连接验证成功');
-      print('SYNC DEBUG: WebDAV 连接验证成功'); // 调试输出
     } catch (e, st) {
       AppLogger.error(logPrefixSync, 'WebDAV 连接验证失败: $e', st);
       rethrow;
@@ -235,15 +225,13 @@ class SyncService {
     
     const remotePath = '/latest_backup.ccm';
     AppLogger.info(logPrefixSync, '开始从 WebDAV 下载备份: $remotePath');
-    print('SYNC DEBUG: 开始从 WebDAV 下载备份: $remotePath'); // 调试输出
     
     List<int>? bytes;
     try {
       // Download into memory byte array
-      print('SYNC DEBUG: 执行 WebDAV read: $remotePath'); // 调试输出
+      AppLogger.debug(logPrefixSync, '执行 WebDAV read: $remotePath');
       bytes = await c.read(remotePath);
       AppLogger.info(logPrefixSync, '备份下载完成, 字节数: ${bytes.length}');
-      print('SYNC DEBUG: 备份下载完成, 字节数: ${bytes.length}'); // 调试输出
     } catch (e, st) {
       // 检查错误类型以提供更有用的信息
       final errorMessage = e.toString().toLowerCase();
@@ -260,8 +248,6 @@ class SyncService {
       }
       
       AppLogger.error(logPrefixSync, detailedMessage, st);
-      print('SYNC DEBUG ERROR: $detailedMessage'); // 调试输出
-      print('SYNC DEBUG ERROR STACK: $st'); // 调试输出
       rethrow;
     }
     

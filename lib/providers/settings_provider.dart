@@ -155,12 +155,31 @@ class AppSettings {
         'auto_save': autoSave,
         'confirm_deletions': confirmDeletions,
       },
+      'backend': {
+        'service_address': backendUrl,
+        'save_path': savePath,
+        'log_level': logLevel,
+      },
+      'sync': {
+        'webdav': {
+          'enabled': webDavProxyEnabled,
+          'url': webDavUrl,
+          'username': webDavUser,
+          // only include password when it's non-empty to avoid overwriting existing secret
+          if (webDavPassword.isNotEmpty) 'password': webDavPassword,
+          'remote_path': ''
+        }
+      }
     };
   }
 
   static AppSettings fromBackendJson(Map<String, dynamic> json) {
     final appearance = json['appearance'] as Map<String, dynamic>? ?? {};
     final behavior = json['behavior'] as Map<String, dynamic>? ?? {};
+    // backend settings
+    final backend = json['backend'] as Map<String, dynamic>? ?? {};
+    final sync = json['sync'] as Map<String, dynamic>? ?? {};
+    final webdav = sync['webdav'] as Map<String, dynamic>? ?? {};
 
     return AppSettings(
       displayFontId: appearance['display_font'] as String? ?? 'default',
@@ -171,6 +190,15 @@ class AppSettings {
       density: appearance['density'] as String? ?? 'comfortable',
       autoSave: behavior['auto_save'] as bool? ?? true,
       confirmDeletions: behavior['confirm_deletions'] as bool? ?? true,
+      backendUrl: backend['service_address'] as String? ?? 'http://localhost:9876',
+      savePath: backend['save_path'] as String? ?? '',
+      logLevel: backend['log_level'] as String? ?? 'info',
+      webDavUrl: webdav['url'] as String? ?? '',
+      webDavUser: webdav['username'] as String? ?? '',
+      // Do not expose encrypted password strings from backend to UI. If backend reports an encrypted value,
+      // treat it as "set but hidden" and leave the UI password empty.
+      webDavPassword: (webdav['password'] as String? ?? '').startsWith('enc:') ? '' : (webdav['password'] as String? ?? ''),
+      webDavProxyEnabled: webdav['enabled'] as bool? ?? false,
     );
   }
 }
@@ -191,8 +219,41 @@ class SettingsNotifier extends StateNotifier<AppSettings> {
 
       if (kIsWeb) {
         try {
+          // Ensure any previously saved backend base URL is loaded before
+          // attempting to contact the backend. Otherwise the default
+          // `http://localhost:9876` may be used and cause connection errors
+          // when the real backend runs on a different host/IP.
+          await ApiService.loadSavedBaseUrl();
+
+          // If there's no saved base URL, prefer the current page origin
+          // (so the web app will call the same host that served the files).
+          if (ApiService.baseUrl == 'http://localhost:9876') {
+            try {
+              final origin = '${Uri.base.scheme}://${Uri.base.host}' +
+                  (Uri.base.hasPort ? ':${Uri.base.port}' : '');
+              ApiService.setBaseUrl(origin);
+            } catch (_) {}
+          }
+
           final settingsData = await ApiService.getAppSettings();
           state = AppSettings.fromBackendJson(settingsData);
+          // 更新 API 服务的 baseUrl，确保后续请求使用后端配置
+          try {
+            ApiService.setBaseUrl(state.backendUrl);
+          } catch (_) {}
+
+          // 如果 UI 的 displayFontId 是 'default'（未指定字体），尝试从后端 fonts 目录
+          // 获取可用字体列表并将第一个字体设为默认。这样用户平时放在
+          // backend/data/fonts 下的第一个字体会自动作为默认字体被选中。
+          try {
+            final fonts = await ApiService.getFontsList();
+            if (fonts.isNotEmpty && (state.displayFontId == 'default' || state.displayFontId.isEmpty)) {
+              final first = fonts.first as Map<String, dynamic>;
+              final fontId = (first['id'] as String?) ?? (first['filename'] as String).split('.').first;
+              state = state.copyWith(displayFontId: fontId);
+            }
+          } catch (_) {}
+
           await LocalConfigService.save(state.toJson());
         } catch (_) {
           _loadFromPrefs();
@@ -223,6 +284,9 @@ class SettingsNotifier extends StateNotifier<AppSettings> {
       webDavPassword: prefs.getString('webDavPassword') ?? '',
       webDavProxyEnabled: prefs.getBool('webDavProxyEnabled') ?? true,
     );
+    try {
+      ApiService.setBaseUrl(state.backendUrl);
+    } catch (_) {}
   }
 
   Future<void> _save() async {

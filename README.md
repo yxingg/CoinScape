@@ -121,6 +121,36 @@ flutter build apk
 
 ---
 
+**Web 部署注意（后端地址与字体）**
+
+- 后端地址来源与优先级：
+  - 前端在启动时会优先读取浏览器保存的后端地址（SharedPreferences / localStorage key = `backend_base_url`）。
+  - 若未保存地址，Web 端会优先使用当前页面的 origin（`Uri.base`），也就是同源主机（this is useful when static files are served by the same backend）。
+  - 仅当以上都不可用时，才会使用内置默认 `http://localhost:9876`。
+  - 如果你从其它设备打开页面但控制台显示 `GET http://localhost:9876/api/settings net::ERR_CONNECTION_REFUSED`，说明客户端还在用默认的 `localhost`；可以在浏览器 Console 里临时运行下面命令保存正确的后端地址：
+
+    ```javascript
+    localStorage.setItem('backend_base_url', 'http://10.168.72.54:9876');
+    location.reload();
+    ```
+
+- 字体默认策略：
+  - 后端会读取 `backend/data/fonts` 目录下的字体文件并暴露 REST API（`GET /api/fonts/` 返回字体列表，`GET /api/fonts/{font_id}` 返回字体文件）。
+  - 当前端设置中的显示字体为 `default`（即未显式选择字体）时，前端会在启动时请求 `/api/fonts/`，并把返回列表的第一个字体自动设置为默认显示字体（这样你把常用字体放在 `backend/data/fonts` 下，系统会自动使用第一个字体）。
+  - 如果你希望前端直接使用内嵌字体资源，也可以把字体文件放到 `assets/fonts/` 并在 `pubspec.yaml` 的 `fonts:` 中注册（项目默认注释了该段）。
+
+- 关于 web 渲染器（CanvasKit / HTML）：
+  - 将字体打包/同源托管后，页面不再依赖外部 CDN（如 fonts.gstatic.com），因此通常**不需要**切换到 `--web-renderer html` 来修复字体加载问题。CanvasKit（默认）或 HTML 渲染器对字体的表现会有差异，但只要字体是同源可用，字体渲染应当正常。
+  - 若你遇到特定设备的渲染差异，可以尝试 `flutter build web --no-web-resources-cdn`（确保构建不把静态资源指向外部 CDN），并按需切换渲染器测试。但这一切在把字体打包或由后端同源提供后通常不是必须步骤。
+
+以上改动的实现细节位于 `lib/providers/settings_provider.dart`：
+- 启动时调用 `ApiService.loadSavedBaseUrl()` 来加载浏览器保存的后端地址。
+- 若无保存地址则使用页面 `Uri.base` 作为 fallback，从而避免将请求错误地发送到客户端本机的 `localhost`。
+- 若 `displayFontId` 为 `'default'`，会从 `ApiService.getFontsList()` 取回字体列表并使用第一个字体的 `id` 作为默认。
+
+
+---
+
 ## 项目结构
 
 ```

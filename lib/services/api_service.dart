@@ -320,6 +320,16 @@ class ApiService {
     return await _get('/settings');
   }
 
+  /// 登录
+  static Future<bool> login(String username, String password) async {
+    try {
+      final resp = await _post('/auth/login', {'username': username, 'password': password});
+      return resp['success'] == true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   /// 更新应用程序设置
   static Future<Map<String, dynamic>> updateAppSettings(Map<String, dynamic> settings) async {
     return await _put('/settings', settings);

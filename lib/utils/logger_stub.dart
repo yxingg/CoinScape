@@ -1,4 +1,5 @@
 import 'dart:html' as html;
+import 'package:flutter/foundation.dart';
 
 Future<String?> initLogWriter() async {
   // Web平台使用localStorage存储日志
@@ -27,9 +28,9 @@ Future<void> appendLog(String line) async {
     } else {
       storage[key] = updatedLogs;
     }
-  } catch (e) {
+    } catch (e) {
     // 如果localStorage失败，至少打印到控制台
-    print('Web日志存储失败: $e\n原始日志: $line');
+    debugPrint('Web日志存储失败: $e\n原始日志: $line');
   }
 }
 
@@ -50,7 +51,12 @@ class LogConfig {
       final storage = html.window.localStorage;
       storage.remove('coinscape_logs');
     } catch (e) {
-      print('清空Web日志失败: $e');
+      debugPrint('清空Web日志失败: $e');
     }
+  }
+
+  /// 通用清空日志接口（供 AppLogger 调用）
+  static Future<void> clearLogs() async {
+    await clearWebLogs();
   }
 }

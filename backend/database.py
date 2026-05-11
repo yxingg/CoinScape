@@ -8,6 +8,7 @@ Data is stored in SAVE_PATH directory on the local filesystem.
 import sqlite3
 import json
 import os
+import crypto
 import shutil
 from datetime import datetime
 from typing import Optional, Dict, Any
@@ -16,39 +17,8 @@ from typing import Optional, Dict, Any
 # CONFIG: config.json support for save_path
 # ============================================================
 _script_dir = os.path.dirname(os.path.abspath(__file__))
-CONFIG_PATH = os.path.join(_script_dir, "config.json")
-
-
-def load_config() -> dict:
-    """Load config from config.json, return empty dict if not exists."""
-    if os.path.isfile(CONFIG_PATH):
-        try:
-            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, IOError):
-            pass
-    return {}
-
-
-def save_config(config: dict):
-    """Save config to config.json."""
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        json.dump(config, f, indent=2, ensure_ascii=False)
-
-
-def get_save_path() -> str:
-    """Get save path: env var > config.json > default."""
-    env_path = os.environ.get("COINSCAPE_SAVE_PATH")
-    if env_path:
-        return env_path
-    cfg = load_config()
-    cfg_path = cfg.get("save_path")
-    if cfg_path:
-        return cfg_path
-    return os.path.join(_script_dir, "data")
-
-
-SAVE_PATH = get_save_path()
+# No config.json support any more; respect env var or default path
+SAVE_PATH = os.environ.get("COINSCAPE_SAVE_PATH") or os.path.join(_script_dir, "data")
 # ============================================================
 
 DB_DIR = os.path.join(SAVE_PATH, "db")
@@ -432,7 +402,38 @@ def load_app_settings() -> Dict[str, Any]:
     if os.path.isfile(SETTINGS_FILE):
         try:
             with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
+                settings = json.load(f)
+
+            # Migrate plaintext WebDAV password -> encrypted format if necessary
+            try:
+                sync_cfg = settings.get('sync', {})
+                webdav = sync_cfg.get('webdav', {}) if isinstance(sync_cfg, dict) else {}
+                pw = webdav.get('password') if isinstance(webdav, dict) else None
+                changed = False
+                if isinstance(pw, str) and pw and not pw.startswith('enc:'):
+                    # encrypt and save
+                    settings.setdefault('sync', {}).setdefault('webdav', {})
+                    settings['sync']['webdav']['password'] = crypto.encrypt_string(pw)
+                    changed = True
+
+                # Ensure auth section exists
+                auth = settings.get('auth')
+                if not auth or not isinstance(auth, dict) or 'password_hash' not in auth:
+                    settings.setdefault('auth', {})
+                    if 'username' not in settings['auth']:
+                        settings['auth']['username'] = 'admin'
+                    if 'password_hash' not in settings['auth']:
+                        settings['auth']['password_hash'] = crypto.hash_password('coinscape')
+                    changed = True
+
+                if changed:
+                    save_app_settings(settings)
+
+            except Exception:
+                # migration should not break reading settings
+                pass
+
+            return settings
         except (json.JSONDecodeError, IOError) as e:
             print(f"Error loading settings: {e}")
     
@@ -456,7 +457,25 @@ def load_app_settings() -> Dict[str, Any]:
         },
         "sync": {
             "auto_sync": False,
-            "sync_interval": 3600
+            "sync_interval": 3600,
+            "webdav": {
+                "enabled": False,
+                "url": "",
+                "username": "",
+                "password": "",
+                "remote_path": ""
+            }
+        },
+        "backend": {
+            "save_path": None,
+            "service_address": "http://localhost:9876",
+            "log_level": "INFO",
+            "proxy_enabled": False
+        }
+        ,
+        "auth": {
+            "username": "admin",
+            "password_hash": crypto.hash_password('coinscape')
         }
     }
 
@@ -469,7 +488,7 @@ def save_app_settings(settings: Dict[str, Any]):
 def update_app_settings(updates: Dict[str, Any]) -> Dict[str, Any]:
     """Update specific settings and return the full updated settings."""
     current = load_app_settings()
-    
+
     # Deep merge updates
     def deep_merge(target: Dict[str, Any], source: Dict[str, Any]) -> Dict[str, Any]:
         for key, value in source.items():
@@ -478,7 +497,51 @@ def update_app_settings(updates: Dict[str, Any]) -> Dict[str, Any]:
             else:
                 target[key] = value
         return target
-    
+
     updated = deep_merge(current, updates)
+
+    # Handle WebDAV password: if caller provided a (non-empty) plaintext password, encrypt it;
+    # if provided but empty, preserve existing password; if not provided, keep as-is.
+    try:
+        if isinstance(updates, dict) and 'sync' in updates and isinstance(updates['sync'], dict):
+            webdav_updates = updates['sync'].get('webdav') if isinstance(updates['sync'].get('webdav'), dict) else None
+            if webdav_updates is not None and 'password' in webdav_updates:
+                new_pw = webdav_updates.get('password')
+                # preserve existing if empty or null
+                if new_pw:
+                    updated.setdefault('sync', {}).setdefault('webdav', {})
+                    updated['sync']['webdav']['password'] = crypto.encrypt_string(new_pw)
+                else:
+                    # restore previous encrypted password if present
+                    prev_pw = current.get('sync', {}).get('webdav', {}).get('password')
+                    if prev_pw:
+                        updated.setdefault('sync', {}).setdefault('webdav', {})
+                        updated['sync']['webdav']['password'] = prev_pw
+                    else:
+                        # ensure absence
+                        if 'password' in updated.get('sync', {}).get('webdav', {}):
+                            updated['sync']['webdav'].pop('password', None)
+    except Exception:
+        pass
+
+    # Handle auth password changes: accept plaintext 'auth.password' in updates and store hashed form
+    try:
+        if isinstance(updates, dict) and 'auth' in updates and isinstance(updates['auth'], dict):
+            auth_updates = updates['auth']
+            if 'password' in auth_updates:
+                new_auth_pw = auth_updates.get('password')
+                if new_auth_pw:
+                    updated.setdefault('auth', {})
+                    updated['auth']['password_hash'] = crypto.hash_password(new_auth_pw)
+                # remove any plaintext password field before saving
+                if 'password' in updated.get('auth', {}):
+                    updated['auth'].pop('password', None)
+            # allow username update
+            if 'username' in auth_updates:
+                updated.setdefault('auth', {})
+                updated['auth']['username'] = auth_updates.get('username')
+    except Exception:
+        pass
+
     save_app_settings(updated)
     return updated
