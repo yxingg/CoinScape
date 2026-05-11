@@ -143,12 +143,6 @@ flutter build apk
   - 将字体打包/同源托管后，页面不再依赖外部 CDN（如 fonts.gstatic.com），因此通常**不需要**切换到 `--web-renderer html` 来修复字体加载问题。CanvasKit（默认）或 HTML 渲染器对字体的表现会有差异，但只要字体是同源可用，字体渲染应当正常。
   - 若你遇到特定设备的渲染差异，可以尝试 `flutter build web --no-web-resources-cdn`（确保构建不把静态资源指向外部 CDN），并按需切换渲染器测试。但这一切在把字体打包或由后端同源提供后通常不是必须步骤。
 
-以上改动的实现细节位于 `lib/providers/settings_provider.dart`：
-- 启动时调用 `ApiService.loadSavedBaseUrl()` 来加载浏览器保存的后端地址。
-- 若无保存地址则使用页面 `Uri.base` 作为 fallback，从而避免将请求错误地发送到客户端本机的 `localhost`。
-- 若 `displayFontId` 为 `'default'`，会从 `ApiService.getFontsList()` 取回字体列表并使用第一个字体的 `id` 作为默认。
-
-
 ---
 
 ## 项目结构

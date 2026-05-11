@@ -117,6 +117,40 @@ flutter build web
 
 # Android APK
 flutter build apk
+
+---
+
+## Web deployment notes (backend & fonts)
+
+- **Backend address priority:**
+  - The web client will first try to load a saved backend address from browser storage (SharedPreferences / localStorage key = `backend_base_url`).
+  - If no saved address is found, the web app will prefer the current page origin (`Uri.base`), i.e. the same host that served the static files. This avoids incorrectly targeting the client's `localhost`.
+  - Only if neither is available will the default `http://localhost:9876` be used.
+  - If you see `GET http://localhost:9876/api/settings net::ERR_CONNECTION_REFUSED` on a remote device, it means the client is still using the localhost default. You can temporarily save the correct backend address in the browser console:
+
+    ```javascript
+    localStorage.setItem('backend_base_url', 'http://10.168.72.54:9876');
+    location.reload();
+    ```
+
+- **Font default strategy:**
+  - The backend exposes fonts placed under `backend/data/fonts` via REST API: `GET /api/fonts/` returns a list of available fonts, and `GET /api/fonts/{font_id}` serves the font file.
+  - When the front-end setting `displayFontId` is `default` (no explicit user selection), the app will request `/api/fonts/` at startup and automatically set the first font returned as the default display font. This means you can drop your preferred fonts into `backend/data/fonts/` and the app will pick the first one automatically.
+  - Alternatively, you can bundle fonts into the Flutter app by placing them in `assets/fonts/` and registering them in `pubspec.yaml`.
+
+- **About web renderer (CanvasKit / HTML):**
+  - If fonts are packaged or served same-origin by the backend, the web page will not need to fetch fonts from external CDNs (e.g. `fonts.gstatic.com`). In that case, switching to `--web-renderer html` is generally **not required** to fix font loading problems.
+  - To ensure the build does not rewrite static asset URLs to external CDNs, build with:
+
+    ```bash
+    flutter build web --no-web-resources-cdn
+    ```
+
+  - If you still encounter rendering differences on particular devices, switching renderers can be used for testing, but hosting fonts same-origin remains the recommended approach.
+
+- **Implementation notes:**
+  - The client-side startup logic lives in `lib/providers/settings_provider.dart`. It calls `ApiService.loadSavedBaseUrl()` to load any saved backend address, falls back to `Uri.base` when not saved, and — when `displayFontId` is `default` — calls `ApiService.getFontsList()` and picks the first available font as the default.
+
 ```
 
 ---
