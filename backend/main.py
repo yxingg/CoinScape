@@ -30,8 +30,9 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 
-import database as db
-import crypto
+from . import database as db
+from . import crypto
+from . import file_sync
 
 _script_dir = os.path.dirname(os.path.abspath(__file__))
 
@@ -633,6 +634,35 @@ async def import_data(data: dict = Body(...)):
     """Import all data from JSON."""
     db.import_all_data(data)
     return {"success": True}
+
+
+# ============================================================
+# File sync (incremental images and data files) API
+# ============================================================
+
+
+@app.post("/api/sync/files/push")
+async def api_push_files():
+    """Trigger scanning and incremental push to WebDAV."""
+    try:
+        res = await file_sync.manager.push_all()
+        return JSONResponse({"success": True, "result": res})
+    except Exception as e:
+        logger = logging.getLogger("coinscape.file_sync.api")
+        logger.exception("push failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/sync/files/status")
+async def api_sync_status():
+    try:
+        st = file_sync.manager.get_status()
+        return JSONResponse({"success": True, "status": st})
+    except Exception as e:
+        logger = logging.getLogger("coinscape.file_sync.api")
+        logger.exception("status check failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 
 # ============================================================

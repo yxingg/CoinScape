@@ -351,6 +351,20 @@ class ApiService {
   static Future<void> importAllData(Map<String, dynamic> data) async {
     await _post('/backup/import', data);
   }
+
+  // ==========================================
+  // File Sync (backend-driven)
+  // ==========================================
+
+  /// Trigger server-side file sync push (scan + incremental upload)
+  static Future<Map<String, dynamic>> startFileSyncPush() async {
+    return await _post('/sync/files/push', {});
+  }
+
+  /// Get current file sync status (counts of pending/in_progress/done/failed)
+  static Future<Map<String, dynamic>> getFileSyncStatus() async {
+    return await _get('/sync/files/status');
+  }
 }
 
 class ApiException implements Exception {

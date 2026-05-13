@@ -248,7 +248,7 @@ class SettingsNotifier extends StateNotifier<AppSettings> {
           try {
             final fonts = await ApiService.getFontsList();
             if (fonts.isNotEmpty && (state.displayFontId == 'default' || state.displayFontId.isEmpty)) {
-              final first = fonts.first as Map<String, dynamic>;
+              final first = fonts.first;
               final fontId = (first['id'] as String?) ?? (first['filename'] as String).split('.').first;
               state = state.copyWith(displayFontId: fontId);
             }

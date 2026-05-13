@@ -8,7 +8,7 @@ Data is stored in SAVE_PATH directory on the local filesystem.
 import sqlite3
 import json
 import os
-import crypto
+from . import crypto
 import shutil
 from datetime import datetime
 from typing import Optional, Dict, Any

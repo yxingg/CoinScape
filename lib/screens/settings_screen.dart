@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -8,6 +9,7 @@ import '../providers/sync_providers.dart';
 import '../providers/coin_providers.dart';
 import '../providers/auth_provider.dart';
 import '../services/sync_service.dart';
+import '../services/file_sync.dart';
 import '../services/api_service.dart';
 import '../services/font_manager.dart';
 import '../database/database.dart';
@@ -42,6 +44,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   bool _isBackendConnected = false;
   bool _isCheckingBackend = false;
   bool _isSavingPath = false;
+  Timer? _statusTimer;
+  Map<String, dynamic>? _syncStatus;
   
   // 日志配置相关
   LogLevel _selectedLogLevel = LogLevel.info;
@@ -110,8 +114,40 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     _acctCurrentPwdCtrl.dispose();
     _acctNewPwdCtrl.dispose();
     _acctConfirmPwdCtrl.dispose();
+    _statusTimer?.cancel();
     
     super.dispose();
+  }
+
+  Future<void> _updateSyncStatus() async {
+    // Prefer backend status; fall back to local FileSyncManager status when backend is unreachable
+    try {
+      final res = await ApiService.getFileSyncStatus();
+      if (res['success'] == true) {
+        final st = res['status'] as Map<String, dynamic>?;
+        if (mounted) setState(() => _syncStatus = st);
+        return;
+      }
+    } catch (_) {
+      // ignore and try local
+    }
+    try {
+      final st = await FileSyncManager.instance.getDetailedStatus();
+      if (mounted) setState(() => _syncStatus = st);
+    } catch (_) {
+      // ignore
+    }
+  }
+
+  void _startStatusPolling() {
+    _statusTimer?.cancel();
+    _updateSyncStatus();
+    _statusTimer = Timer.periodic(const Duration(seconds: 2), (_) => _updateSyncStatus());
+  }
+
+  void _stopStatusPolling() {
+    _statusTimer?.cancel();
+    _statusTimer = null;
   }
 
   Future<void> _changeAccount() async {
@@ -260,51 +296,49 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
        return;
     }
     setState(() => _isSyncing = true);
-    AppLogger.info(logPrefixSettings, '开始 WebDAV 上传...');
+    AppLogger.info(logPrefixSettings, '开始触发文件同步 (push)...');
     try {
-      final repo = ref.read(coinRepositoryProvider);
-      final series = await repo.getAllSeries();
-      final coins = await repo.getAllCoins();
-      final links = <CoinSeriesLinkData>[];
-      final coinImages = <CoinImage>[];
-      final seriesImages = <SeriesImage>[];
-
-      // 收集所有关联数据
-      for (final coin in coins) {
-        final linkIds = await repo.getSeriesIdsForCoin(coin.id);
-        for (final sid in linkIds) {
-          links.add(CoinSeriesLinkData(coinId: coin.id, seriesId: sid));
+      final backendOk = await ApiService.checkHealth();
+      if (backendOk) {
+        final pushFuture = ApiService.startFileSyncPush();
+        _startStatusPolling();
+        final res = await pushFuture;
+        if (res['success'] == true) {
+          if (mounted) DialogHelper.showSuccessSnackBar(context, '后端推送已完成');
+        } else {
+          if (mounted) DialogHelper.showErrorSnackBar(context, '后端推送失败');
         }
-        final imgs = await repo.getCoinImages(coin.id);
-        coinImages.addAll(imgs);
-      }
-      for (final s in series) {
-        final imgs = await repo.getSeriesImages(s.id);
-        seriesImages.addAll(imgs);
-      }
-
-      AppLogger.info(logPrefixSettings, '数据汇总: ${series.length} 个业务, ${coins.length} 枚纪念币');
-      final service = _getService();
-      AppLogger.info(logPrefixSettings, '调用 service.pushBackup()...');
-      await service.pushBackup(series, coins, links, coinImages, seriesImages);
-      
-      AppLogger.info(logPrefixSettings, 'WebDAV 上传成功');
-      if (mounted) {
-        DialogHelper.showSuccessSnackBar(context, '推送(上传)成功！');
+        _stopStatusPolling();
+      } else {
+        // fallback to local file-level incremental sync
+        final wcfg = ref.read(webDavConfigProvider);
+        if (!wcfg.isValid) {
+          if (mounted) DialogHelper.showWarningSnackBar(context, '未配置 WebDAV，无法本地上传');
+          return;
+        }
+        _startStatusPolling();
+        final cfg = {
+          'url': wcfg.url,
+          'username': wcfg.user,
+          'password': wcfg.password,
+          'remote_path': ''
+        };
+        try {
+          final res = await FileSyncManager.instance.pushAll(cfg);
+          if (res['process'] != null && (res['process']['succeeded'] as int) > 0) {
+            if (mounted) DialogHelper.showSuccessSnackBar(context, '本地上传已完成');
+          } else {
+            if (mounted) DialogHelper.showErrorSnackBar(context, '本地上传完成（无文件或全部失败）');
+          }
+        } catch (e) {
+          if (mounted) DialogHelper.showErrorSnackBar(context, '本地上传失败: $e');
+        } finally {
+          _stopStatusPolling();
+        }
       }
     } catch (e, st) {
-      // 显示更详细的错误信息
-      final errorStr = e.toString();
-      final fullError = '上传失败: $errorStr\n类型: ${e.runtimeType}\n栈追踪: $st';
-      AppLogger.error(logPrefixSettings, fullError, st);
-AppLogger.error(logPrefixSettings, '上传失败 - $errorStr');
-
-      AppLogger.error(logPrefixSettings, '上传失败类型: ${e.runtimeType}');
-
-      AppLogger.error(logPrefixSettings, '堆栈跟踪: $st');
-      if (mounted) {
-        DialogHelper.showErrorSnackBar(context, '云端备份失败: $errorStr');
-      }
+      AppLogger.error(logPrefixSettings, '推送失败: $e', st);
+      if (mounted) DialogHelper.showErrorSnackBar(context, '云端备份失败: $e');
     } finally {
       if (mounted) setState(() => _isSyncing = false);
       AppLogger.info(logPrefixSettings, '上传操作完成');
@@ -1353,6 +1387,76 @@ DialogHelper.showSuccessSnackBar(context, value ? '已启用后端代理' : '已
                   ),
                 ],
               ),
+            const SizedBox(height: 12),
+            // 显示同步状态（支持后端简要状态与本地详细状态）
+            if (_syncStatus != null) ...[
+              Builder(builder: (ctx) {
+                final counts = _syncStatus!['counts'] ?? _syncStatus!;
+                final inProg = _syncStatus!.containsKey('in_progress') ? (_syncStatus!['in_progress'] as List<dynamic>) : <dynamic>[];
+                final failedList = _syncStatus!.containsKey('failed') ? (_syncStatus!['failed'] as List<dynamic>) : <dynamic>[];
+
+                return Column(
+                  children: [
+                    Center(
+                      child: Wrap(
+                        spacing: 8,
+                        runSpacing: 6,
+                        alignment: WrapAlignment.center,
+                        children: [
+                          Chip(label: Text('待上传 ${counts['pending'] ?? 0}')),
+                          Chip(label: Text('进行中 ${counts['in_progress'] ?? 0}')),
+                          Chip(label: Text('已完成 ${counts['done'] ?? 0}')),
+                          Chip(label: Text('失败 ${counts['failed'] ?? 0}')),
+                        ],
+                      ),
+                    ),
+                    if (_isSyncing) const Padding(
+                      padding: EdgeInsets.only(top: 8.0),
+                      child: LinearProgressIndicator(),
+                    ),
+                    const SizedBox(height: 8),
+                    // 进行中项（展示前3）
+                    if (inProg.isNotEmpty) ...[
+                      Align(alignment: Alignment.centerLeft, child: Text('进行中任务', style: TextStyle(fontWeight: FontWeight.w600))),
+                      const SizedBox(height: 6),
+                      Column(
+                        children: inProg.take(3).map<Widget>((e) {
+                          final item = e as Map<String, dynamic>;
+                          return ListTile(
+                            dense: true,
+                            leading: const Icon(Icons.sync, size: 18),
+                            title: Text(item['path'] ?? ''),
+                            subtitle: Text('尝试: ${item['attempts'] ?? 0}'),
+                          );
+                        }).toList(),
+                      ),
+                      const SizedBox(height: 6),
+                    ],
+                    // 失败项（展示前5，含错误信息）
+                    if (failedList.isNotEmpty) ...[
+                      Align(alignment: Alignment.centerLeft, child: Text('失败任务', style: TextStyle(fontWeight: FontWeight.w600, color: Colors.red[700]))),
+                      const SizedBox(height: 6),
+                      Column(
+                        children: failedList.take(5).map<Widget>((e) {
+                          final item = e as Map<String, dynamic>;
+                          return ListTile(
+                            dense: true,
+                            leading: const Icon(Icons.error_outline, size: 18, color: Colors.red),
+                            title: Text(item['path'] ?? ''),
+                            subtitle: Text(item['error'] ?? '错误未知', style: const TextStyle(fontSize: 12)),
+                          );
+                        }).toList(),
+                      ),
+                    ],
+                  ],
+                );
+              }),
+            ] else ...[
+              Padding(
+                padding: const EdgeInsets.only(top: 6.0),
+                child: Text('同步状态尚未查询', style: TextStyle(color: Colors.grey[600])),
+              ),
+            ],
           ],
         ),
       ),
