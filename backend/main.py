@@ -715,12 +715,6 @@ async def get_settings():
         settings.setdefault('sync', {})
         settings['sync']['latest_change_source'] = latest_source
         settings['sync']['latest_change_time'] = latest_time
-        # expose raw local/cloud timestamps for frontend display
-        try:
-            settings['sync']['last_local_change'] = last_local
-            settings['sync']['last_cloud_change'] = last_cloud
-        except Exception:
-            pass
     except Exception:
         # 不应阻塞设置读取
         pass
@@ -818,36 +812,6 @@ async def import_data(data: dict = Body(...)):
     return {"success": True}
 
 
-@app.post("/api/backup/import_merge")
-async def import_data_merge(data: dict = Body(...)):
-    """Merge-import backup JSON into existing DB.
-
-    Body format: the same export structure (`series`, `coins`, `links`, `coinImages`, `seriesImages`).
-    Optional top-level key `policy` can be provided to select conflict strategy: `prefer_local` (default), `prefer_remote`, `merge_fields`.
-    """
-    try:
-        policy = 'prefer_local'
-        if isinstance(data, dict) and 'policy' in data:
-            policy = data.get('policy') or policy
-        # If the payload wraps the backup under 'backup' key, accept that too
-        if isinstance(data, dict) and ('series' in data or 'coins' in data):
-            backup = data
-        elif isinstance(data, dict) and 'backup' in data and isinstance(data['backup'], dict):
-            backup = data['backup']
-        else:
-            # nothing to import
-            raise HTTPException(status_code=400, detail='Invalid backup payload')
-
-        await asyncio.to_thread(db.import_merge_data, backup, policy)
-        return JSONResponse({"success": True, "policy": policy})
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger = logging.getLogger("coinscape.backup.api")
-        logger.exception("merge import failed")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 # ============================================================
 # File sync (incremental images and data files) API
 # ============================================================
@@ -865,30 +829,6 @@ async def api_push_files(data: dict = Body(None)):
     except Exception as e:
         logger = logging.getLogger("coinscape.file_sync.api")
         logger.exception("push failed")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/api/sync/files/scan")
-async def api_scan_files(data: dict = Body(None)):
-    """Scan local save_path and enqueue upload/delete tasks without processing the queue.
-    Returns detailed status including pending list.
-    Optional JSON body: {"force": true}
-    """
-    try:
-        force = False
-        if isinstance(data, dict):
-            force = bool(data.get('force', False))
-        # run scan in thread pool
-        scan_summary = await asyncio.to_thread(file_sync.manager.scan_and_queue, force)
-        # fetch detailed status (increase pending limit)
-        try:
-            st = await asyncio.to_thread(file_sync.manager.get_detailed_status, 1000)
-        except Exception:
-            st = await asyncio.to_thread(file_sync.manager.get_detailed_status)
-        return JSONResponse({"success": True, "scan": scan_summary, "status": st})
-    except Exception as e:
-        logger = logging.getLogger("coinscape.file_sync.api")
-        logger.exception("scan failed")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -930,27 +870,13 @@ async def api_retry_failed(data: dict = Body(None)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/sync/files/queue")
-async def api_sync_queue():
-    try:
-        queue = await asyncio.to_thread(file_sync.manager.get_full_queue)
-        return JSONResponse({"success": True, "queue": queue})
-    except Exception as e:
-        logger = logging.getLogger("coinscape.file_sync.api")
-        logger.exception("queue fetch failed")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 @app.post("/api/sync/files/pull")
 async def api_pull_files(data: dict = Body(None)):
     """Trigger server-side file-level pull from WebDAV and import.
     This will download remote files into backend save_path and import DB if present.
     """
     try:
-        policy = 'prefer_local'
-        if isinstance(data, dict) and 'policy' in data:
-            policy = data.get('policy') or policy
-        res = await file_sync.manager.pull_all(policy=policy)
+        res = await file_sync.manager.pull_all()
         return JSONResponse({"success": True, "result": res})
     except Exception as e:
         logger = logging.getLogger("coinscape.file_sync.api")

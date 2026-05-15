@@ -49,14 +49,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   Map<String, dynamic>? _syncStatus;
   String? _latestChangeSource;
   String? _latestChangeTime;
-  String? _localLatestTime;
-  String? _cloudLatestTime;
   bool _hasQueriedLatestChange = false;
-  String _mergePolicy = 'prefer_local';
-  // upload queue UI
-  List<Map<String, dynamic>> _uploadQueue = [];
-  bool _showUploadQueue = false;
-  Timer? _uploadPollTimer;
   
   // 日志配置相关
   LogLevel _selectedLogLevel = LogLevel.info;
@@ -109,18 +102,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         _acctUserCtrl.text = user;
         _storedAuthUsername = user;
       });
-      // load merge policy from backend settings if present
-      try {
-        final sync = map['sync'] as Map<String, dynamic>?;
-        final mp = sync != null && (sync['merge_policy'] is String || sync['mergePolicy'] is String)
-            ? (sync['merge_policy'] ?? sync['mergePolicy']) as String
-            : null;
-        if (mp != null && mounted) setState(() => _mergePolicy = mp);
-      } catch (_) {}
     } catch (_) {
       // ignore
     }
-    // 同步最新修改信息（仅在启动时执行）
+    // 同步最新修改信息（非阻塞）
     _loadLatestChangeInfo();
   }
 
@@ -130,14 +115,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       final sync = map['sync'] as Map<String, dynamic>?;
       final src = sync != null && sync['latest_change_source'] is String ? sync['latest_change_source'] as String : null;
       final t = sync != null && sync['latest_change_time'] is String ? sync['latest_change_time'] as String : null;
-      final local = sync != null && sync['last_local_change'] is String ? sync['last_local_change'] as String : null;
-      final cloud = sync != null && sync['last_cloud_change'] is String ? sync['last_cloud_change'] as String : null;
       if (mounted) {
         setState(() {
           _latestChangeSource = src;
           _latestChangeTime = _formatBeijing(t);
-          _localLatestTime = _formatBeijing(local);
-          _cloudLatestTime = _formatBeijing(cloud);
           _hasQueriedLatestChange = true;
         });
       }
@@ -212,41 +193,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     _acctNewPwdCtrl.dispose();
     _acctConfirmPwdCtrl.dispose();
     _statusTimer?.cancel();
-    _uploadPollTimer?.cancel();
     
     super.dispose();
-  }
-
-  Future<void> _fetchQueueOnce() async {
-    try {
-      final res = await ApiService.getFileSyncQueue();
-      if (res['success'] == true && res['queue'] is List) {
-        final list = (res['queue'] as List).map((e) => Map<String, dynamic>.from(e as Map)).where((e) => e['action'] == 'upload').toList();
-        if (mounted) setState(() {
-          _uploadQueue = list;
-        });
-        // stop polling if no pending or in-progress items remain
-        final hasActive = list.any((e) {
-          final s = (e['status'] ?? '') as String;
-          return s == 'pending' || s == 'in-progress' || s == 'in_progress';
-        });
-        if (!hasActive) {
-          _stopUploadPolling();
-        }
-      }
-    } catch (_) {}
-  }
-
-  void _startUploadPolling() {
-    _uploadPollTimer?.cancel();
-    _uploadPollTimer = Timer.periodic(const Duration(seconds: 1), (_) async {
-      await _fetchQueueOnce();
-    });
-  }
-
-  void _stopUploadPolling() {
-    _uploadPollTimer?.cancel();
-    _uploadPollTimer = null;
   }
 
   Future<void> _updateSyncStatus() async {
@@ -409,10 +357,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         webDavUser: user,
         webDavPassword: pwd.isNotEmpty ? pwd : s.webDavPassword,
       ));
-      // persist merge policy to backend settings as well
-      try {
-        await ApiService.updateAppSettings({'sync': {'merge_policy': _mergePolicy}});
-      } catch (_) {}
       if (mounted) {
         DialogHelper.showSuccessSnackBar(context, '配置已保存');
       }
@@ -425,53 +369,27 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
   Future<void> _push() async {
     if (!ref.read(webDavConfigProvider).isValid) {
-          AppLogger.warning(logPrefixSettings, 'WebDAV 未配置');
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('请先配置并保存 WebDAV')));
-          return;
+      AppLogger.warning(logPrefixSettings, 'WebDAV 未配置');
+       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('请先配置并保存 WebDAV')));
+       return;
     }
     setState(() => _isSyncing = true);
     AppLogger.info(logPrefixSettings, '开始触发文件同步 (push)...');
     try {
-          final backendOk = await ApiService.checkHealth();
-          if (backendOk) {
-            // First scan and show pending files without processing
-            setState(() {
-              _isSyncing = true;
-              _showUploadQueue = true;
-              _uploadQueue = [];
-            });
-            try {
-              final scanRes = await ApiService.startFileSyncScan();
-              if (scanRes['success'] == true) {
-                final status = scanRes['status'] as Map<String, dynamic>?;
-                final pending = status != null && status['pending_preview'] is List ? (status['pending_preview'] as List).map((e) => Map<String, dynamic>.from(e as Map)).toList() : <Map<String,dynamic>>[];
-                if (mounted) setState(() {
-                  _uploadQueue = pending;
-                });
-                // start polling queue to update statuses
-                _startUploadPolling();
-                // show list and then proceed to upload
-                final confirmed = await DialogHelper.showConfirmDialog(context: context, title: '开始上传', content: '发现 ${_uploadQueue.length} 个要上传的文件，是否开始上传？');
-                if (confirmed == true) {
-                  final pushFuture = ApiService.startFileSyncPush();
-                  _startStatusPolling();
-                  final res = await pushFuture;
-                  if (res['success'] == true) {
-                    if (mounted) DialogHelper.showSuccessSnackBar(context, '后端推送已完成');
-                  } else {
-                    if (mounted) DialogHelper.showErrorSnackBar(context, '后端推送失败');
-                  }
-                  _stopStatusPolling();
-                }
-              } else {
-                if (mounted) DialogHelper.showErrorSnackBar(context, '扫描失败');
-              }
-            } catch (e) {
-              if (mounted) DialogHelper.showErrorSnackBar(context, '扫描或上传触发失败: $e');
-            } finally {
-              if (mounted) setState(() => _isSyncing = false);
-            }
-          } else {
+      final backendOk = await ApiService.checkHealth();
+      if (backendOk) {
+        final pushFuture = ApiService.startFileSyncPush();
+        _startStatusPolling();
+        final res = await pushFuture;
+        if (res['success'] == true) {
+          if (mounted) DialogHelper.showSuccessSnackBar(context, '后端推送已完成');
+        } else {
+          if (mounted) DialogHelper.showErrorSnackBar(context, '后端推送失败');
+        }
+        _stopStatusPolling();
+        // refresh latest-change info after push
+        await _loadLatestChangeInfo();
+      } else {
         // fallback to local file-level incremental sync
         final wcfg = ref.read(webDavConfigProvider);
         if (!wcfg.isValid) {
@@ -504,6 +422,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     } finally {
       if (mounted) setState(() => _isSyncing = false);
       AppLogger.info(logPrefixSettings, '上传操作完成');
+        await _loadLatestChangeInfo();
     }
   }
 
@@ -519,12 +438,12 @@ AppLogger.warning(logPrefixSettings, 'WebDAV 未配置');
       final backendOk = await ApiService.checkHealth();
       if (backendOk) {
         // Use server-side file-level pull, then fetch exported JSON and merge locally
-        final res = await ApiService.startFileSyncPullWithPolicy(_mergePolicy);
+        final res = await ApiService.startFileSyncPull();
         if (res['success'] == true) {
-          // server performed pull and merged according to policy; fetch exported JSON and merge locally
+          // fetch exported JSON from backend and merge into local DB
           final exported = await ApiService.exportAllData();
           final SyncDataImported = SyncData.fromJson(exported);
-          AppLogger.info(logPrefixSettings, '服务器拉取并合并完成, 开始本地合并...');
+          AppLogger.info(logPrefixSettings, '服务器拉取完成, 开始合并数据...');
           if (mounted) await _mergeData(SyncDataImported);
           AppLogger.info(logPrefixSettings, '拉取下载並合并成功');
           if (mounted) DialogHelper.showSuccessSnackBar(context, '拉取(下载)并合并成功！');
@@ -559,6 +478,7 @@ AppLogger.error(logPrefixSettings, '下载失败 - $errorStr');
       }
     } finally {
       if (mounted) setState(() => _isSyncing = false);
+        await _loadLatestChangeInfo();
     }
   }
 
@@ -762,6 +682,7 @@ AppLogger.error(logPrefixSettings, '下载失败 - $errorStr');
                           minimumSize: const Size(double.infinity, 44),
                         ),
                       ),
+                      
                       const SizedBox(height: 12),
                       
                       // 清空日志文件按钮
@@ -1587,28 +1508,9 @@ DialogHelper.showSuccessSnackBar(context, value ? '已启用后端代理' : '已
                 prefixIcon: Icon(Icons.lock),
               ),
               obscureText: true,
-              validator: (v) => null,
+              validator: (v) => v!.isEmpty ? '密码不能为空' : null,
             ),
-            const SizedBox(height: 12),
-            // 合并策略（放在云同步配置中）
-            Row(
-              children: [
-                const Expanded(child: Text('合并策略', style: TextStyle(fontWeight: FontWeight.w500))),
-                DropdownButton<String>(
-                  value: _mergePolicy,
-                  items: const [
-                    DropdownMenuItem(value: 'prefer_local', child: Text('保留本地（默认）')),
-                    DropdownMenuItem(value: 'prefer_remote', child: Text('以远端为准')),
-                    DropdownMenuItem(value: 'merge_fields', child: Text('字段级合并')),
-                  ],
-                  onChanged: (v) {
-                    if (v != null) setState(() => _mergePolicy = v);
-                  },
-                  underline: const SizedBox.shrink(),
-                ),
-              ],
-            ),
-            const SizedBox(height: 12),
+            const SizedBox(height: 20),
             SizedBox(
               width: double.infinity,
               child: FilledButton.icon(
@@ -1621,83 +1523,64 @@ DialogHelper.showSuccessSnackBar(context, value ? '已启用后端代理' : '已
             if (_isSyncing)
               const Center(child: CircularProgressIndicator())
             else
-              LayoutBuilder(builder: (ctx, constraints) {
-                final syncBox = Container(
-                  margin: const EdgeInsets.symmetric(horizontal: 8),
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                  decoration: BoxDecoration(
-                    color: _buildSyncBoxColor(),
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(
-                      color: _buildSyncBoxBorderColor(),
-                      width: 1,
-                    ),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [
+                  ElevatedButton.icon(
+                    onPressed: _push,
+                    icon: const Icon(Icons.cloud_upload),
+                    label: const Text('云端备份 (Push)'),
+                    style: ElevatedButton.styleFrom(backgroundColor: Theme.of(context).primaryColorLight),
                   ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.max,
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      _buildSyncBoxIcon(),
-                      const SizedBox(width: 8),
-                      Flexible(
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(_buildSyncBoxLabel(), style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: _buildSyncBoxTextColor())),
-                            const SizedBox(height: 6),
-                            Text('本地: ${_localLatestTime ?? '未查询'}', style: TextStyle(fontSize: 11, color: Colors.grey[700])),
-                            Text('云端: ${_cloudLatestTime ?? '未查询'}', style: TextStyle(fontSize: 11, color: Colors.grey[700])),
-                          ],
+                  // 同步状态框
+                  Expanded(
+                    child: Container(
+                      margin: const EdgeInsets.symmetric(horizontal: 8),
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                      decoration: BoxDecoration(
+                        color: _buildSyncBoxColor(),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(
+                          color: _buildSyncBoxBorderColor(),
+                          width: 1,
                         ),
                       ),
-                      const SizedBox(width: 6),
-                      if (!_isCheckingBackend && _hasQueriedLatestChange)
-                        IconButton(
-                          icon: const Icon(Icons.refresh, size: 16),
-                          onPressed: _loadLatestChangeInfo,
-                          tooltip: '刷新同步状态',
-                          padding: EdgeInsets.zero,
-                          constraints: const BoxConstraints(minWidth: 24, minHeight: 24),
-                        ),
-                    ],
+                      child: Row(
+                        mainAxisSize: MainAxisSize.max,
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          _buildSyncBoxIcon(),
+                          const SizedBox(width: 8),
+                          Column(
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(_buildSyncBoxLabel(), style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: _buildSyncBoxTextColor())),
+                              const SizedBox(height: 2),
+                              Text(_latestChangeTime ?? '未查询', style: TextStyle(fontSize: 12, color: Colors.grey[700])),
+                            ],
+                          ),
+                          const SizedBox(width: 6),
+                          if (!_isCheckingBackend && _hasQueriedLatestChange)
+                            IconButton(
+                              icon: const Icon(Icons.refresh, size: 16),
+                              onPressed: _loadLatestChangeInfo,
+                              tooltip: '刷新同步状态',
+                              padding: EdgeInsets.zero,
+                              constraints: const BoxConstraints(minWidth: 24, minHeight: 24),
+                            ),
+                        ],
+                      ),
+                    ),
                   ),
-                );
-
-                if (constraints.maxWidth < 520) {
-                  // narrow layout: stack vertically
-                  return Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      SizedBox(width: double.infinity, child: ElevatedButton.icon(onPressed: _push, icon: const Icon(Icons.cloud_upload), label: const Text('云端备份 (Push)'), style: ElevatedButton.styleFrom(backgroundColor: Theme.of(context).primaryColorLight))),
-                      const SizedBox(height: 8),
-                      syncBox,
-                      const SizedBox(height: 8),
-                      SizedBox(width: double.infinity, child: ElevatedButton.icon(onPressed: _pull, icon: const Icon(Icons.cloud_download), label: const Text('拉取合并 (Pull)'), style: ElevatedButton.styleFrom(backgroundColor: Colors.green.shade100))),
-                    ],
-                  );
-                }
-
-                // wide layout: buttons + expanded sync box
-                return Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                  children: [
-                    ElevatedButton.icon(
-                      onPressed: _push,
-                      icon: const Icon(Icons.cloud_upload),
-                      label: const Text('云端备份 (Push)'),
-                      style: ElevatedButton.styleFrom(backgroundColor: Theme.of(context).primaryColorLight),
-                    ),
-                    Expanded(child: syncBox),
-                    ElevatedButton.icon(
-                      onPressed: _pull,
-                      icon: const Icon(Icons.cloud_download),
-                      label: const Text('拉取合并 (Pull)'),
-                      style: ElevatedButton.styleFrom(backgroundColor: Colors.green.shade100),
-                    ),
-                  ],
-                );
-              }),
+                  ElevatedButton.icon(
+                    onPressed: _pull,
+                    icon: const Icon(Icons.cloud_download),
+                    label: const Text('拉取合并 (Pull)'),
+                    style: ElevatedButton.styleFrom(backgroundColor: Colors.green.shade100),
+                  ),
+                ],
+              ),
             const SizedBox(height: 12),
             // 显示同步状态（支持后端简要状态与本地详细状态）
             if (_syncStatus != null) ...[
@@ -1712,33 +1595,53 @@ DialogHelper.showSuccessSnackBar(context, value ? '已启用后端代理' : '已
 
                 return Column(
                   children: [
-                    if (_uploadQueue.isNotEmpty) ...[
-                      Align(alignment: Alignment.centerLeft, child: Text('待上传文件 (${_uploadQueue.length})', style: TextStyle(fontWeight: FontWeight.w600))),
-                      const SizedBox(height: 8),
+                    Center(
+                      child: Wrap(
+                        spacing: 8,
+                        runSpacing: 6,
+                        alignment: WrapAlignment.center,
+                        children: [
+                          Chip(label: Text('待上传 ${counts['pending'] ?? 0}')),
+                          Chip(label: Text('进行中 ${counts['in_progress'] ?? 0}')),
+                          Chip(label: Text('已完成 ${counts['done'] ?? 0}')),
+                          Chip(label: Text('失败 ${counts['failed'] ?? 0}')),
+                        ],
+                      ),
+                    ),
+                    if (_isSyncing) const Padding(
+                      padding: EdgeInsets.only(top: 8.0),
+                      child: LinearProgressIndicator(),
+                    ),
+                    const SizedBox(height: 8),
+                    // 进行中项（展示前3）
+                    if (inProg.isNotEmpty) ...[
+                      Align(alignment: Alignment.centerLeft, child: Text('进行中任务', style: TextStyle(fontWeight: FontWeight.w600))),
+                      const SizedBox(height: 6),
                       Column(
-                        children: _uploadQueue.map<Widget>((e) {
-                          final status = (e['status'] ?? 'pending') as String;
-                          Icon leading;
-                          Widget trailing = const SizedBox.shrink();
-                          if (status == 'in-progress' || status == 'in-progress') {
-                            leading = Icon(Icons.sync, color: Theme.of(context).colorScheme.primary);
-                          } else if (status == 'done') {
-                            leading = Icon(Icons.check_circle, color: Colors.green);
-                          } else if (status == 'failed') {
-                            leading = Icon(Icons.error_outline, color: Colors.red);
-                          } else {
-                            leading = Icon(Icons.hourglass_top, color: Colors.grey[700]);
-                          }
-                          final subtitleParts = <String>[];
-                          subtitleParts.add('状态: $status');
-                          if (e['attempts'] != null) subtitleParts.add('尝试: ${e['attempts']}');
-                          if (e['error'] != null && (e['error'] as String).isNotEmpty) subtitleParts.add('错误: ${e['error']}');
+                        children: inProg.take(3).map<Widget>((e) {
+                          final item = e as Map<String, dynamic>;
                           return ListTile(
                             dense: true,
-                            leading: leading,
-                            title: Text(e['path'] ?? ''),
-                            subtitle: Text(subtitleParts.join(' · '), style: const TextStyle(fontSize: 12)),
-                            trailing: trailing,
+                            leading: const Icon(Icons.sync, size: 18),
+                            title: Text(item['path'] ?? ''),
+                            subtitle: Text('尝试: ${item['attempts'] ?? 0}'),
+                          );
+                        }).toList(),
+                      ),
+                      const SizedBox(height: 6),
+                    ],
+                    // 失败项（展示前5，含错误信息）
+                    if (failedList.isNotEmpty) ...[
+                      Align(alignment: Alignment.centerLeft, child: Text('失败任务', style: TextStyle(fontWeight: FontWeight.w600, color: Colors.red[700]))),
+                      const SizedBox(height: 6),
+                      Column(
+                        children: failedList.take(5).map<Widget>((e) {
+                          final item = e as Map<String, dynamic>;
+                          return ListTile(
+                            dense: true,
+                            leading: const Icon(Icons.error_outline, size: 18, color: Colors.red),
+                            title: Text(item['path'] ?? ''),
+                            subtitle: Text(item['error'] ?? '错误未知', style: const TextStyle(fontSize: 12)),
                           );
                         }).toList(),
                       ),
@@ -1760,7 +1663,7 @@ DialogHelper.showSuccessSnackBar(context, value ? '已启用后端代理' : '已
                                 DialogHelper.showErrorSnackBar(context, '重试失败: $e');
                               } finally {
                                 setState(() => _isSyncing = false);
-                                _startUploadPolling();
+                                _startStatusPolling();
                               }
                             },
                             child: const Text('重试失败项'),
@@ -1772,7 +1675,7 @@ DialogHelper.showSuccessSnackBar(context, value ? '已启用后端代理' : '已
                                 final res = await ApiService.retryFailedSync(clear: true);
                                 if (res['success'] == true) {
                                   DialogHelper.showSuccessSnackBar(context, '已清理失败记录');
-                                  _startUploadPolling();
+                                  _startStatusPolling();
                                 } else {
                                   DialogHelper.showErrorSnackBar(context, '清理失败记录失败');
                                 }
@@ -1784,92 +1687,28 @@ DialogHelper.showSuccessSnackBar(context, value ? '已启用后端代理' : '已
                           ),
                         ],
                       ),
-                    ] else ...[
-                      // Fallback: show current detailed status without count chips
-                      if (_isSyncing) const Padding(
-                        padding: EdgeInsets.only(top: 8.0),
-                        child: LinearProgressIndicator(),
-                      ),
-                      const SizedBox(height: 8),
-                      // 进行中项（展示前3）
-                      if (inProg.isNotEmpty) ...[
-                        Align(alignment: Alignment.centerLeft, child: Text('进行中任务', style: TextStyle(fontWeight: FontWeight.w600))),
-                        const SizedBox(height: 6),
-                        Column(
-                          children: inProg.take(3).map<Widget>((e) {
-                            final item = e as Map<String, dynamic>;
-                            return ListTile(
-                              dense: true,
-                              leading: const Icon(Icons.sync, size: 18),
-                              title: Text(item['path'] ?? ''),
-                              subtitle: Text('尝试: ${item['attempts'] ?? 0}'),
-                            );
-                          }).toList(),
-                        ),
-                        const SizedBox(height: 6),
-                      ],
-                      // 失败项（展示前5，含错误信息）
-                      if (failedList.isNotEmpty) ...[
-                        Align(alignment: Alignment.centerLeft, child: Text('失败任务', style: TextStyle(fontWeight: FontWeight.w600, color: Colors.red[700]))),
-                        const SizedBox(height: 6),
-                        Column(
-                          children: failedList.take(5).map<Widget>((e) {
-                            final item = e as Map<String, dynamic>;
-                            return ListTile(
-                              dense: true,
-                              leading: const Icon(Icons.error_outline, size: 18, color: Colors.red),
-                              title: Text(item['path'] ?? ''),
-                              subtitle: Text(item['error'] ?? '错误未知', style: const TextStyle(fontSize: 12)),
-                            );
-                          }).toList(),
-                        ),
-                        const SizedBox(height: 8),
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.end,
-                          children: [
-                            FilledButton(
-                              onPressed: () async {
-                                try {
-                                  setState(() => _isSyncing = true);
-                                  final res = await ApiService.retryFailedSync();
-                                  if (res['success'] == true) {
-                                    DialogHelper.showSuccessSnackBar(context, '已触发重试');
-                                  } else {
-                                    DialogHelper.showErrorSnackBar(context, '重试请求返回失败');
-                                  }
-                                } catch (e) {
-                                  DialogHelper.showErrorSnackBar(context, '重试失败: $e');
-                                } finally {
-                                  setState(() => _isSyncing = false);
-                                  _startStatusPolling();
-                                }
-                              },
-                              child: const Text('重试失败项'),
-                            ),
-                            const SizedBox(width: 8),
-                            OutlinedButton(
-                              onPressed: () async {
-                                try {
-                                  final res = await ApiService.retryFailedSync(clear: true);
-                                  if (res['success'] == true) {
-                                    DialogHelper.showSuccessSnackBar(context, '已清理失败记录');
-                                    _startStatusPolling();
-                                  } else {
-                                    DialogHelper.showErrorSnackBar(context, '清理失败记录失败');
-                                  }
-                                } catch (e) {
-                                  DialogHelper.showErrorSnackBar(context, '清理失败: $e');
-                                }
-                              },
-                              child: const Text('清理失败记录'),
-                            ),
-                          ],
-                        ),
-                      ],
                     ],
                   ],
                 );
               }),
+            ] else ...[
+                Padding(
+                  padding: const EdgeInsets.only(top: 6.0),
+                  child: Column(
+                    children: [
+                      if (_latestChangeSource != null) ...[
+                        Text("最新修改来源: ${_latestChangeSource == 'cloud' ? '云端' : _latestChangeSource == 'local' ? '本地' : _latestChangeSource}", style: TextStyle(color: Colors.grey[800])),
+                        const SizedBox(height: 4),
+                      ],
+                      if (_latestChangeTime != null) ...[
+                        Text("最新修改时间: ${_latestChangeTime}", style: TextStyle(color: Colors.grey[600], fontSize: 12)),
+                      ],
+                      if (_latestChangeSource == null && _latestChangeTime == null) ...[
+                        Text("同步状态尚未查询", style: TextStyle(color: Colors.grey[600])),
+                      ],
+                    ],
+                  ),
+                ),
             ],
           ],
         ),

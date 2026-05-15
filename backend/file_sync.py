@@ -447,7 +447,7 @@ class FileSyncManager:
         except Exception:
             return {}
 
-    async def pull_all(self, policy: str = 'prefer_local') -> Dict[str, Any]:
+    async def pull_all(self) -> Dict[str, Any]:
         """Download files from remote WebDAV into local save_path (file-level pull + DB import when DB found).
         Returns summary.
         """
@@ -541,14 +541,13 @@ class FileSyncManager:
                 await asyncio.to_thread(self._db_update_file_index_after_upload, rel, last_synced_at, href, etag)
                 downloaded += 1
 
-                # if this is the sqlite DB file, extract and merge-import according to policy
+                # if this is the sqlite DB file, extract and import
                 if rel == 'db/coinscape.db':
                     try:
                         temp_db_path = target_local
                         data = await asyncio.to_thread(self._extract_data_from_sqlite_file, temp_db_path)
                         if data:
-                            # perform non-destructive merge into server DB according to policy
-                            await asyncio.to_thread(db.import_merge_data, data, policy)
+                            await asyncio.to_thread(db.import_all_data, data)
                             imported_db = True
                     except Exception as e:
                         await asyncio.to_thread(self._db_mark_queue_failed, -1, f'db_import_error:{e}')
@@ -783,17 +782,6 @@ class FileSyncManager:
         done = cur.fetchone()['c']
         conn.close()
         return {'pending': pending, 'in_progress': inprog, 'failed': failed, 'done': done}
-
-    def get_full_queue(self) -> List[Dict[str, Any]]:
-        """Return the full sync_queue table rows for inspection.
-        Each item: {id, path, action, status, attempts, last_attempt_at, error}
-        """
-        conn = self._get_conn()
-        cur = conn.cursor()
-        cur.execute("SELECT id, path, action, status, attempts, last_attempt_at, error FROM sync_queue ORDER BY id")
-        rows = [dict(r) for r in cur.fetchall()]
-        conn.close()
-        return rows
 
     # --- Thread-safe DB helpers (synchronous, intended to be called via asyncio.to_thread) ---
     def _db_fetch_pending_task(self) -> Optional[Dict[str, Any]]:
