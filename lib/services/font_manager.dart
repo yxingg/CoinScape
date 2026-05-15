@@ -116,7 +116,7 @@ class FontManager {
   /// 允许用户自行选择手机/电脑里的 .ttf/.otf 文件并保存
   /// 可以同时选择多个文件
   static Future<List<String>> pickAndSaveCustomFonts() async {
-    FilePickerResult? result = await FilePicker.platform.pickFiles(
+    FilePickerResult? result = await FilePicker.pickFiles(
       type: FileType.custom,
       allowedExtensions: ['ttf', 'otf'],
       allowMultiple: true, // 允许选择多个文件

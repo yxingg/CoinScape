@@ -25,14 +25,22 @@ from typing import Optional, Dict, List
 from urllib.parse import urlparse, quote
 
 import httpx
+import asyncio
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Body, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 
-from . import database as db
-from . import crypto
-from . import file_sync
+# Support running `python main.py` (script) and `python -m backend.main` (module)
+try:
+    from . import database as db
+    from . import crypto
+    from . import file_sync
+except Exception:
+    # Fallback to plain imports when executed as a script (no package context)
+    import database as db
+    import crypto
+    import file_sync
 
 _script_dir = os.path.dirname(os.path.abspath(__file__))
 
@@ -252,6 +260,10 @@ async def create_series(data: dict = Body(...)):
     if "created_at" not in data:
         data["created_at"] = datetime.now().isoformat()
     db.save_series(data)
+    try:
+        _mark_local_change()
+    except Exception:
+        pass
     return {"success": True, "id": data["id"]}
 
 
@@ -259,12 +271,20 @@ async def create_series(data: dict = Body(...)):
 async def update_series(series_id: str, data: dict = Body(...)):
     data["id"] = series_id
     db.save_series(data)
+    try:
+        _mark_local_change()
+    except Exception:
+        pass
     return {"success": True}
 
 
 @app.delete("/api/series/{series_id}")
 async def delete_series(series_id: str):
     db.delete_series(series_id)
+    try:
+        _mark_local_change()
+    except Exception:
+        pass
     return {"success": True}
 
 
@@ -273,6 +293,10 @@ async def delete_series_batch(data: dict = Body(...)):
     ids = data.get("ids", [])
     for sid in ids:
         db.delete_series(sid)
+    try:
+        _mark_local_change()
+    except Exception:
+        pass
     return {"success": True}
 
 
@@ -302,6 +326,10 @@ async def create_coin(data: dict = Body(...)):
     if "created_at" not in data:
         data["created_at"] = datetime.now().isoformat()
     db.save_coin(data)
+    try:
+        _mark_local_change()
+    except Exception:
+        pass
     return {"success": True, "id": data["id"]}
 
 
@@ -309,12 +337,20 @@ async def create_coin(data: dict = Body(...)):
 async def update_coin(coin_id: str, data: dict = Body(...)):
     data["id"] = coin_id
     db.save_coin(data)
+    try:
+        _mark_local_change()
+    except Exception:
+        pass
     return {"success": True}
 
 
 @app.delete("/api/coins/{coin_id}")
 async def delete_coin(coin_id: str):
     db.delete_coin(coin_id)
+    try:
+        _mark_local_change()
+    except Exception:
+        pass
     return {"success": True}
 
 
@@ -323,6 +359,10 @@ async def delete_coins_batch(data: dict = Body(...)):
     ids = data.get("ids", [])
     for cid in ids:
         db.delete_coin(cid)
+    try:
+        _mark_local_change()
+    except Exception:
+        pass
     return {"success": True}
 
 
@@ -338,30 +378,50 @@ async def get_coin_series_ids(coin_id: str):
 @app.post("/api/links")
 async def link_coin_to_series(data: dict = Body(...)):
     db.link_coin_to_series(data["coin_id"], data["series_id"])
+    try:
+        _mark_local_change()
+    except Exception:
+        pass
     return {"success": True}
 
 
 @app.delete("/api/links")
 async def unlink_coin_from_series(coin_id: str, series_id: str):
     db.unlink_coin_from_series(coin_id, series_id)
+    try:
+        _mark_local_change()
+    except Exception:
+        pass
     return {"success": True}
 
 
 @app.post("/api/links/set-tags")
 async def set_coin_series_tags(data: dict = Body(...)):
     db.set_coin_series_tags(data["coin_id"], data["series_ids"])
+    try:
+        _mark_local_change()
+    except Exception:
+        pass
     return {"success": True}
 
 
 @app.post("/api/links/batch-add")
 async def add_coins_to_series(data: dict = Body(...)):
     db.add_coins_to_series(data["coin_ids"], data["series_ids"])
+    try:
+        _mark_local_change()
+    except Exception:
+        pass
     return {"success": True}
 
 
 @app.post("/api/links/batch-remove")
 async def remove_coins_from_all_series(data: dict = Body(...)):
     db.remove_coins_from_all_series(data["coin_ids"])
+    try:
+        _mark_local_change()
+    except Exception:
+        pass
     return {"success": True}
 
 
@@ -377,6 +437,10 @@ async def get_coin_images(coin_id: str):
 @app.post("/api/images/coin/{coin_id}")
 async def replace_coin_images(coin_id: str, data: dict = Body(...)):
     db.replace_coin_images(coin_id, data.get("image_paths", []))
+    try:
+        _mark_local_change()
+    except Exception:
+        pass
     return {"success": True}
 
 
@@ -388,6 +452,10 @@ async def get_series_images(series_id: str):
 @app.post("/api/images/series/{series_id}")
 async def replace_series_images(series_id: str, data: dict = Body(...)):
     db.replace_series_images(series_id, data.get("image_paths", []))
+    try:
+        _mark_local_change()
+    except Exception:
+        pass
     return {"success": True}
 
 
@@ -569,7 +637,110 @@ async def delete_font(font_id: str):
 @app.get("/api/settings")
 async def get_settings():
     """Get all application settings."""
-    return db.load_app_settings()
+    settings = await asyncio.to_thread(db.load_app_settings)
+    # 计算本地/云端最近修改来源（非持久化、仅用于前端显示）
+    try:
+        sync = settings.get('sync') if isinstance(settings.get('sync'), dict) else {}
+        last_local = sync.get('last_local_change')
+
+        # 尝试从 WebDAV 读取远端备份标记文件
+        last_cloud = None
+        try:
+            webdav_cfg = sync.get('webdav') if isinstance(sync.get('webdav'), dict) else {}
+            if webdav_cfg.get('enabled') and webdav_cfg.get('url'):
+                user = webdav_cfg.get('username') or ''
+                enc_pw = webdav_cfg.get('password') or ''
+                try:
+                    pw = crypto.decrypt_string(enc_pw) if enc_pw else ''
+                except Exception:
+                    pw = enc_pw or ''
+                auth = (user, pw) if user or pw else None
+                remote_root = webdav_cfg.get('remote_path') or ''
+                meta_rel = '.coinscape/last_cloud_backup.txt'
+                try:
+                    target_url = file_sync.manager._build_remote_url(webdav_cfg.get('url'), remote_root, meta_rel)
+                    async with httpx.AsyncClient(timeout=10.0) as client:
+                                resp = await client.get(target_url, auth=auth)
+                                if resp.status_code in (200, 201):
+                                    # try parse JSON metadata; fall back to plain ISO text for backward compatibility
+                                    try:
+                                        j = resp.json()
+                                        if isinstance(j, dict) and 'timestamp' in j:
+                                            last_cloud = j.get('timestamp')
+                                        elif isinstance(j, dict) and 'timestamp' not in j and 'time' in j:
+                                            last_cloud = j.get('time')
+                                        else:
+                                            # fallback to plain text
+                                            text = (resp.text or '').strip()
+                                            if text:
+                                                last_cloud = text
+                                    except Exception:
+                                        text = (resp.text or '').strip()
+                                        if text:
+                                            last_cloud = text
+                except Exception:
+                    logging.getLogger('coinscape.sync').exception('Failed to fetch remote backup marker')
+
+        except Exception:
+            last_cloud = None
+
+        def _parse_iso(s: str):
+            try:
+                return datetime.fromisoformat(s) if s else None
+            except Exception:
+                return None
+
+        local_dt = _parse_iso(last_local)
+        cloud_dt = _parse_iso(last_cloud)
+
+        latest_source = None
+        latest_time = None
+        if local_dt and cloud_dt:
+            if local_dt > cloud_dt:
+                latest_source = 'local'
+                latest_time = last_local
+            elif cloud_dt > local_dt:
+                latest_source = 'cloud'
+                latest_time = last_cloud
+            else:
+                latest_source = 'equal'
+                latest_time = last_local
+        elif local_dt:
+            latest_source = 'local'
+            latest_time = last_local
+        elif cloud_dt:
+            latest_source = 'cloud'
+            latest_time = last_cloud
+
+        settings.setdefault('sync', {})
+        settings['sync']['latest_change_source'] = latest_source
+        settings['sync']['latest_change_time'] = latest_time
+        # expose raw local/cloud timestamps for frontend display
+        try:
+            settings['sync']['last_local_change'] = last_local
+            settings['sync']['last_cloud_change'] = last_cloud
+        except Exception:
+            pass
+    except Exception:
+        # 不应阻塞设置读取
+        pass
+
+    return settings
+
+
+def _mark_local_change():
+    """记录本地最后一次更改时间到 settings.sync.last_local_change（UTC isoformat）。"""
+    try:
+        now = datetime.utcnow().isoformat()
+        try:
+            loop = asyncio.get_running_loop()
+            # schedule update in thread pool to avoid blocking
+            loop.create_task(asyncio.to_thread(db.update_app_settings, {'sync': {'last_local_change': now}}))
+        except RuntimeError:
+            # no running loop; fallback to synchronous update
+            db.update_app_settings({'sync': {'last_local_change': now}})
+    except Exception:
+        logging.getLogger("coinscape.sync").exception("Failed to record last_local_change")
 
 
 @app.post("/api/auth/login")
@@ -580,7 +751,7 @@ async def auth_login(data: dict = Body(...)):
     if not username or not password:
         raise HTTPException(status_code=400, detail="username and password required")
 
-    settings = db.load_app_settings()
+    settings = await asyncio.to_thread(db.load_app_settings)
     auth = settings.get('auth', {}) if isinstance(settings, dict) else {}
     stored_user = auth.get('username')
     stored_hash = auth.get('password_hash')
@@ -595,7 +766,11 @@ async def auth_login(data: dict = Body(...)):
 @app.put("/api/settings")
 async def update_settings(data: dict = Body(...)):
     """Update application settings."""
-    updated = db.update_app_settings(data)
+    updated = await asyncio.to_thread(db.update_app_settings, data)
+    try:
+        _mark_local_change()
+    except Exception:
+        pass
     return {"success": True, "settings": updated}
 
 
@@ -607,15 +782,22 @@ async def update_settings_category(category: str, data: dict = Body(...)):
     if category not in valid_categories:
         raise HTTPException(status_code=400, detail=f"Invalid category. Must be one of: {valid_categories}")
     
-    current = db.load_app_settings()
+    current = await asyncio.to_thread(db.load_app_settings)
     if category not in current:
         current[category] = {}
     
     # 合并更新
     for key, value in data.items():
         current[category][key] = value
-    
-    db.save_app_settings(current)
+
+    # 记录本地更改时间
+    try:
+        current.setdefault('sync', {})
+        current['sync']['last_local_change'] = datetime.utcnow().isoformat()
+    except Exception:
+        pass
+
+    await asyncio.to_thread(db.save_app_settings, current)
     return {"success": True, "settings": current}
 
 
@@ -636,16 +818,49 @@ async def import_data(data: dict = Body(...)):
     return {"success": True}
 
 
+@app.post("/api/backup/import_merge")
+async def import_data_merge(data: dict = Body(...)):
+    """Merge-import backup JSON into existing DB.
+
+    Body format: the same export structure (`series`, `coins`, `links`, `coinImages`, `seriesImages`).
+    Optional top-level key `policy` can be provided to select conflict strategy: `prefer_local` (default), `prefer_remote`, `merge_fields`.
+    """
+    try:
+        policy = 'prefer_local'
+        if isinstance(data, dict) and 'policy' in data:
+            policy = data.get('policy') or policy
+        # If the payload wraps the backup under 'backup' key, accept that too
+        if isinstance(data, dict) and ('series' in data or 'coins' in data):
+            backup = data
+        elif isinstance(data, dict) and 'backup' in data and isinstance(data['backup'], dict):
+            backup = data['backup']
+        else:
+            # nothing to import
+            raise HTTPException(status_code=400, detail='Invalid backup payload')
+
+        await asyncio.to_thread(db.import_merge_data, backup, policy)
+        return JSONResponse({"success": True, "policy": policy})
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger = logging.getLogger("coinscape.backup.api")
+        logger.exception("merge import failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ============================================================
 # File sync (incremental images and data files) API
 # ============================================================
 
 
 @app.post("/api/sync/files/push")
-async def api_push_files():
-    """Trigger scanning and incremental push to WebDAV."""
+async def api_push_files(data: dict = Body(None)):
+    """Trigger scanning and incremental push to WebDAV. Accepts optional JSON body `{"force": true}` to force full upload of all files."""
     try:
-        res = await file_sync.manager.push_all()
+        force = False
+        if isinstance(data, dict):
+            force = bool(data.get('force', False))
+        res = await file_sync.manager.push_all(force=force)
         return JSONResponse({"success": True, "result": res})
     except Exception as e:
         logger = logging.getLogger("coinscape.file_sync.api")
@@ -653,15 +868,166 @@ async def api_push_files():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/sync/files/scan")
+async def api_scan_files(data: dict = Body(None)):
+    """Scan local save_path and enqueue upload/delete tasks without processing the queue.
+    Returns detailed status including pending list.
+    Optional JSON body: {"force": true}
+    """
+    try:
+        force = False
+        if isinstance(data, dict):
+            force = bool(data.get('force', False))
+        # run scan in thread pool
+        scan_summary = await asyncio.to_thread(file_sync.manager.scan_and_queue, force)
+        # fetch detailed status (increase pending limit)
+        try:
+            st = await asyncio.to_thread(file_sync.manager.get_detailed_status, 1000)
+        except Exception:
+            st = await asyncio.to_thread(file_sync.manager.get_detailed_status)
+        return JSONResponse({"success": True, "scan": scan_summary, "status": st})
+    except Exception as e:
+        logger = logging.getLogger("coinscape.file_sync.api")
+        logger.exception("scan failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/sync/files/status")
 async def api_sync_status():
     try:
-        st = file_sync.manager.get_status()
+        # Return a detailed structure (counts + lists) so frontend can render queues
+        if hasattr(file_sync.manager, 'get_detailed_status'):
+            st = await asyncio.to_thread(file_sync.manager.get_detailed_status)
+        else:
+            st = await asyncio.to_thread(file_sync.manager.get_status)
         return JSONResponse({"success": True, "status": st})
     except Exception as e:
         logger = logging.getLogger("coinscape.file_sync.api")
         logger.exception("status check failed")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/sync/files/retry_failed")
+async def api_retry_failed(data: dict = Body(None)):
+    """Retry or clear failed sync queue entries.
+    POST body `{ "clear": true }` will delete failed rows; default behaviour will mark failed rows pending and trigger a push.
+    """
+    try:
+        clear = False
+        if isinstance(data, dict):
+            clear = bool(data.get('clear', False))
+
+        if clear:
+            await asyncio.to_thread(file_sync.manager._db_clear_failed)
+            return JSONResponse({"success": True, "cleared": True})
+        else:
+            await asyncio.to_thread(file_sync.manager._db_retry_failed)
+            res = await file_sync.manager.push_all()
+            return JSONResponse({"success": True, "result": res})
+    except Exception as e:
+        logger = logging.getLogger("coinscape.file_sync.api")
+        logger.exception("retry_failed failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/sync/files/queue")
+async def api_sync_queue():
+    try:
+        queue = await asyncio.to_thread(file_sync.manager.get_full_queue)
+        return JSONResponse({"success": True, "queue": queue})
+    except Exception as e:
+        logger = logging.getLogger("coinscape.file_sync.api")
+        logger.exception("queue fetch failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/sync/files/pull")
+async def api_pull_files(data: dict = Body(None)):
+    """Trigger server-side file-level pull from WebDAV and import.
+    This will download remote files into backend save_path and import DB if present.
+    """
+    try:
+        policy = 'prefer_local'
+        if isinstance(data, dict) and 'policy' in data:
+            policy = data.get('policy') or policy
+        res = await file_sync.manager.pull_all(policy=policy)
+        return JSONResponse({"success": True, "result": res})
+    except Exception as e:
+        logger = logging.getLogger("coinscape.file_sync.api")
+        logger.exception("pull failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/upload/chunk")
+async def upload_chunk(file: UploadFile = File(...), fileId: str = Form(...), index: int = Form(...)):
+    """接收单个分块（multipart/form-data），保存到后端临时分块目录。"""
+    try:
+        settings = await asyncio.to_thread(db.load_app_settings)
+        save_path = settings.get('backend', {}).get('save_path') or db.SAVE_PATH
+        tmp_dir = os.path.join(save_path, 'uploads', fileId)
+        os.makedirs(tmp_dir, exist_ok=True)
+
+        # 保持分块按序排序，使用固定宽度序号文件名
+        part_name = f"{int(index):06d}.part"
+        part_path = os.path.join(tmp_dir, part_name)
+        content = await file.read()
+        with open(part_path, 'wb') as f:
+            f.write(content)
+
+        return JSONResponse({"success": True, "index": index})
+    except Exception as e:
+        logger = logging.getLogger("coinscape.upload")
+        logger.exception("upload chunk failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/upload/complete")
+async def complete_upload(fileId: str = Form(...), filename: str = Form(...), overwrite: bool = Form(False)):
+    """合并分块并将最终文件写入后端 `backend.save_path` 下的 files 目录（原子替换）。"""
+    try:
+        settings = await asyncio.to_thread(db.load_app_settings)
+        save_path = settings.get('backend', {}).get('save_path') or db.SAVE_PATH
+        tmp_dir = os.path.join(save_path, 'uploads', fileId)
+        if not os.path.isdir(tmp_dir):
+            raise HTTPException(status_code=404, detail="upload id not found")
+
+        safe_name = os.path.basename(filename) or f"{fileId}"
+        dest_dir = os.path.join(save_path, 'files')
+        os.makedirs(dest_dir, exist_ok=True)
+        dest_path = os.path.join(dest_dir, safe_name)
+
+        if os.path.exists(dest_path) and not overwrite:
+            raise HTTPException(status_code=409, detail="file exists")
+
+        parts = sorted([p for p in os.listdir(tmp_dir) if p.endswith('.part')])
+        if not parts:
+            raise HTTPException(status_code=400, detail="no parts uploaded")
+
+        tmp_final = os.path.join(tmp_dir, 'final.tmp')
+        with open(tmp_final, 'wb') as out_f:
+            for p in parts:
+                ppath = os.path.join(tmp_dir, p)
+                with open(ppath, 'rb') as pf:
+                    shutil.copyfileobj(pf, out_f)
+
+        # 原子移动到目标路径
+        shutil.move(tmp_final, dest_path)
+
+        # 清理临时目录
+        try:
+            shutil.rmtree(tmp_dir)
+        except Exception:
+            pass
+
+        rel_path = os.path.relpath(dest_path, save_path)
+        return JSONResponse({"success": True, "path": rel_path})
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger = logging.getLogger("coinscape.upload")
+        logger.exception("complete upload failed")
+        raise HTTPException(status_code=500, detail=str(e))
+    
 
 
 
@@ -676,7 +1042,7 @@ async def api_sync_status():
 async def proxy_webdav_handler(request: Request):
     # Check whether proxy is enabled in settings
     try:
-        settings = db.load_app_settings()
+        settings = await asyncio.to_thread(db.load_app_settings)
         backend_cfg = settings.get('backend', {}) if isinstance(settings, dict) else {}
         proxy_enabled = backend_cfg.get('proxy_enabled') if isinstance(backend_cfg, dict) else None
         if proxy_enabled in (False, None):
@@ -731,6 +1097,28 @@ async def proxy_webdav_impl(request: Request):
     username = request.query_params.get("user")
     password = request.query_params.get("password")
     
+    # 如果客户端没有提供认证信息，尝试从后端设置中读取已保存的 WebDAV 凭据并解密
+    if not username or not password:
+        try:
+            cfg = await asyncio.to_thread(db.load_app_settings)
+            sync_cfg = cfg.get('sync', {}) if isinstance(cfg, dict) else {}
+            webdav_cfg = sync_cfg.get('webdav', {}) if isinstance(sync_cfg, dict) else {}
+            stored_user = webdav_cfg.get('username')
+            stored_pw = webdav_cfg.get('password')
+            if (not username) and stored_user:
+                username = stored_user
+            if (not password) and stored_pw:
+                try:
+                    password = crypto.decrypt_string(stored_pw)
+                except Exception:
+                    # 如果解密失败，退回使用原始存储值（可能是明文）
+                    password = stored_pw
+            if username or password:
+                logger = logging.getLogger("coinscape.proxy")
+                logger.debug(f"Proxy using stored backend credentials: user_set={bool(username)}, pw_set={bool(password)}")
+        except Exception:
+            # ignore failures here; we will proceed without credentials
+            pass
     if not target_url:
         raise HTTPException(status_code=400, detail="Missing 'target' query parameter")
     

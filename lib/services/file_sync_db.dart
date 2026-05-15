@@ -1,9 +1,5 @@
-import 'dart:io';
-
 import 'package:drift/drift.dart';
-import 'package:drift/native.dart';
-import 'package:path/path.dart' as p;
-import 'package:path_provider/path_provider.dart';
+import 'file_sync_executor.dart';
 
 part 'file_sync_db.g.dart';
 
@@ -39,9 +35,7 @@ class FileSyncDb extends _$FileSyncDb {
 
   static Future<FileSyncDb> getInstance() async {
     if (_instance != null) return _instance!;
-    final dir = await getApplicationDocumentsDirectory();
-    final dbFile = File(p.join(dir.path, 'file_sync.db'));
-    final executor = NativeDatabase(dbFile);
+    final executor = createFileSyncExecutor();
     _instance = FileSyncDb._internal(executor);
     return _instance!;
   }

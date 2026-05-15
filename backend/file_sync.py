@@ -1,6 +1,8 @@
 import os
 import sqlite3
 import hashlib
+import json
+import uuid
 import logging
 import threading
 import asyncio
@@ -9,9 +11,14 @@ from typing import Optional, Dict, Any, List
 from urllib.parse import urlparse, urlunparse, quote
 
 import httpx
+import random
 
-from . import database as db
-from . import crypto
+try:
+    from . import database as db
+    from . import crypto
+except Exception:
+    import database as db
+    import crypto
 
 logger = logging.getLogger("coinscape.file_sync")
 
@@ -119,7 +126,7 @@ class FileSyncManager:
         conn.commit()
         conn.close()
 
-    def scan_and_queue(self) -> Dict[str, int]:
+    def scan_and_queue(self, force: bool = False) -> Dict[str, int]:
         """
         Scan `SAVE_PATH` recursively and enqueue upload/delete tasks.
         Returns simple summary.
@@ -147,28 +154,36 @@ class FileSyncManager:
 
                 entry = self._get_index_entry(rel)
 
-                # quick check by size+mtime
-                if entry and entry.get('size') == size and float(entry.get('mtime') or 0) == mtime:
+                # quick check by size+mtime; if not forcing a full push then skip unchanged files
+                if entry and entry.get('size') == size and float(entry.get('mtime') or 0) == mtime and not force:
                     self._update_index_seen(rel, start_ts)
                     seen.add(rel)
                     continue
 
-                # compute hash when changed or new
+                # compute hash when changed or new (or when forcing)
                 try:
                     sha = self.compute_sha256(full)
                 except Exception:
                     sha = ''
 
-                if not entry or sha != (entry.get('hash') if entry else None):
-                    # mark for upload
-                    self._upsert_index(rel, sha, size, mtime, start_ts)
+                # If force is requested, always enqueue uploads (even if hash unchanged)
+                if force:
+                    self._upsert_index(rel, sha, size, mtime, start_ts,
+                                       last_synced_at=(entry.get('last_synced_at') if entry else None),
+                                       remote_path=(entry.get('remote_path') if entry else None),
+                                       remote_etag=(entry.get('remote_etag') if entry else None))
                     self._enqueue(rel, 'upload')
                 else:
-                    # update seen/time
-                    self._upsert_index(rel, sha, size, mtime, start_ts,
-                                       last_synced_at=entry.get('last_synced_at'),
-                                       remote_path=entry.get('remote_path'),
-                                       remote_etag=entry.get('remote_etag'))
+                    if not entry or sha != (entry.get('hash') if entry else None):
+                        # mark for upload
+                        self._upsert_index(rel, sha, size, mtime, start_ts)
+                        self._enqueue(rel, 'upload')
+                    else:
+                        # update seen/time
+                        self._upsert_index(rel, sha, size, mtime, start_ts,
+                                           last_synced_at=entry.get('last_synced_at'),
+                                           remote_path=entry.get('remote_path'),
+                                           remote_etag=entry.get('remote_etag'))
 
                 seen.add(rel)
 
@@ -220,12 +235,333 @@ class FileSyncManager:
             u = urlunparse((parsed.scheme, parsed.netloc, p, '', '', ''))
             try:
                 # MKCOL may return 201 (created) or 405 (already exists) or 409 (conflict)
-                resp = await client.request('MKCOL', u, auth=auth, timeout=30.0)
+                try:
+                    resp = await self._request_with_retry(client, 'MKCOL', u, auth=auth, timeout=30.0, max_attempts=2)
+                except Exception:
+                    continue
                 if resp.status_code in (201, 405, 200, 204):
                     continue
             except Exception:
                 # best-effort: ignore and continue
                 continue
+
+    async def _write_remote_backup_marker(self, webdav_cfg: Dict[str, Any], iso_ts: Optional[str] = None, rel_meta: str = '.coinscape/last_cloud_backup.txt') -> bool:
+        """Write a small marker file containing iso timestamp to remote WebDAV under rel_meta.
+        Returns True on success.
+        """
+        url = webdav_cfg.get('url') if isinstance(webdav_cfg, dict) else ''
+        if not url:
+            return False
+
+        user = webdav_cfg.get('username') or ''
+        enc_pw = webdav_cfg.get('password') or ''
+        try:
+            pw = crypto.decrypt_string(enc_pw) if enc_pw else ''
+        except Exception:
+            pw = enc_pw or ''
+        remote_root = webdav_cfg.get('remote_path') or ''
+        auth = (user, pw) if user or pw else None
+
+        if not iso_ts:
+            iso_ts = datetime.utcnow().isoformat()
+
+        # fetch/generate device id and user info from settings (offload to thread)
+        try:
+            settings = await asyncio.to_thread(db.load_app_settings)
+            sync_conf = settings.get('sync') if isinstance(settings.get('sync'), dict) else settings.get('sync', {})
+            device_id = sync_conf.get('device_id') if isinstance(sync_conf, dict) else None
+            if not device_id:
+                device_id = uuid.uuid4().hex
+                try:
+                    await asyncio.to_thread(db.update_app_settings, {'sync': {'device_id': device_id}})
+                except Exception:
+                    pass
+            user_info = settings.get('auth', {}).get('username') if isinstance(settings.get('auth'), dict) else None
+        except Exception:
+            device_id = uuid.uuid4().hex
+            user_info = None
+
+        payload = {'timestamp': iso_ts, 'device_id': device_id, 'user': user_info}
+        # checksum over sorted JSON to ensure stable checksum
+        try:
+            payload_bytes = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode('utf-8')
+            checksum = hashlib.sha256(payload_bytes).hexdigest()
+            payload['checksum'] = checksum
+            data = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+        except Exception:
+            data = iso_ts.encode('utf-8')
+
+        target_url = self._build_remote_url(url, remote_root, rel_meta)
+        parsed = urlparse(target_url)
+        tmp_path = parsed.path + '.part'
+        tmp_url = urlunparse((parsed.scheme, parsed.netloc, tmp_path, '', '', ''))
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            try:
+                await self._ensure_remote_parent_dirs_async(client, tmp_url, auth)
+            except Exception:
+                pass
+
+            try:
+                put_tmp = await client.put(tmp_url, content=data, auth=auth)
+            except Exception as e:
+                logger.exception('put tmp for remote marker failed: %s', e)
+                return False
+
+            if put_tmp.status_code in (200, 201, 204):
+                move_headers = {'Destination': target_url, 'Overwrite': 'T'}
+                try:
+                    move_resp = await client.request('MOVE', tmp_url, headers=move_headers, auth=auth)
+                    if move_resp.status_code in (200, 201, 204):
+                        return True
+                    else:
+                        # fallback to direct PUT
+                        try:
+                            put_final = await client.put(target_url, content=data, auth=auth)
+                            return put_final.status_code in (200, 201, 204)
+                        except Exception:
+                            return False
+                except Exception:
+                    try:
+                        await client.delete(tmp_url, auth=auth)
+                    except Exception:
+                        pass
+                    return False
+            else:
+                # try direct put
+                try:
+                    put_final = await client.put(target_url, content=data, auth=auth)
+                    return put_final.status_code in (200, 201, 204)
+                except Exception:
+                    return False
+
+    async def _list_remote_files(self, client: httpx.AsyncClient, base_url: str, remote_root: str, auth: Optional[tuple]) -> List[Dict[str, Any]]:
+        """Return list of remote files under the remote_root. Each item: {'href': href_url, 'size': int or None}
+        Uses PROPFIND recursion (Depth:1) to enumerate children.
+        """
+        start_url = self._build_remote_url(base_url, remote_root, '')
+        if not start_url.endswith('/'):
+            start_url = start_url + '/'
+
+        to_visit = [start_url]
+        seen = set()
+        files = []
+
+        propfind_body = '<?xml version="1.0" encoding="utf-8"?>\n<d:propfind xmlns:d="DAV:">\n  <d:prop>\n    <d:getcontentlength/>\n    <d:getlastmodified/>\n    <d:resourcetype/>\n  </d:prop>\n</d:propfind>'
+
+        while to_visit:
+            url = to_visit.pop(0)
+            if url in seen:
+                continue
+            seen.add(url)
+            headers = {'Depth': '1', 'Content-Type': 'text/xml'}
+            try:
+                resp = await self._request_with_retry(client, 'PROPFIND', url, auth=auth, headers=headers, content=propfind_body, timeout=30.0, max_attempts=2)
+            except Exception:
+                # cannot list this url; skip
+                continue
+
+            try:
+                root = ET.fromstring(resp.text)
+            except Exception:
+                continue
+
+            for resp_el in root.findall('.//{DAV:}response'):
+                href_el = resp_el.find('{DAV:}href')
+                if href_el is None or not href_el.text:
+                    continue
+                href = href_el.text
+                parsed_href = urlparse(href)
+                href_url = urlunparse((parsed_href.scheme or urlparse(url).scheme, parsed_href.netloc or urlparse(url).netloc, parsed_href.path, '', '', ''))
+
+                # try to inspect prop (only consider propstat with 200)
+                is_dir = False
+                size = None
+                for propstat in resp_el.findall('{DAV:}propstat'):
+                    status_el = propstat.find('{DAV:}status')
+                    if status_el is not None and '200' not in (status_el.text or ''):
+                        continue
+                    prop = propstat.find('{DAV:}prop')
+                    if prop is not None:
+                        rt = prop.find('{DAV:}resourcetype')
+                        if rt is not None and rt.find('{DAV:}collection') is not None:
+                            is_dir = True
+                        gl = prop.find('{DAV:}getcontentlength')
+                        if gl is not None and gl.text:
+                            try:
+                                size = int(gl.text)
+                            except Exception:
+                                size = None
+                    break
+
+                if is_dir:
+                    if not href_url.endswith('/'):
+                        href_url = href_url + '/'
+                    if href_url not in seen:
+                        to_visit.append(href_url)
+                else:
+                    files.append({'href': href_url, 'size': size})
+
+        return files
+
+    def _relpath_from_remote_href(self, base_url: str, remote_root: str, href_url: str) -> Optional[str]:
+        """Compute relative path under save_path for a given remote href URL."""
+        try:
+            parsed_base = urlparse(base_url)
+            base_segments = [s for s in parsed_base.path.split('/') if s]
+            root_segments = [s for s in (remote_root or '').split('/') if s]
+            prefix_len = len(base_segments) + len(root_segments)
+
+            parsed_href = urlparse(href_url)
+            href_segments = [unquote(s) for s in parsed_href.path.split('/') if s]
+            if len(href_segments) <= prefix_len:
+                return None
+            rel_segments = href_segments[prefix_len:]
+            return '/'.join(rel_segments)
+        except Exception:
+            return None
+
+    def _extract_data_from_sqlite_file(self, path: str) -> Dict[str, Any]:
+        """Read a sqlite DB file at `path` and return exportable dict (series, coins, links, coinImages, seriesImages)."""
+        try:
+            conn = sqlite3.connect(path)
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            def rows(q):
+                cur.execute(q)
+                return [dict(r) for r in cur.fetchall()]
+
+            series = rows("SELECT id, name, description, created_at FROM series")
+            coins = rows("SELECT id, name, year, face_value, material, weight, diameter, mintage, mint, grade, unit_price, quantity, quantity_unit, collection_time, created_at, comments, first_image_path FROM coins")
+            links = rows("SELECT coin_id, series_id FROM coin_series_link")
+            coinImages = rows("SELECT id, coin_id, image_path, sort_order FROM coin_images")
+            seriesImages = rows("SELECT id, series_id, image_path, sort_order FROM series_images")
+            conn.close()
+            return {
+                'series': series,
+                'coins': coins,
+                'links': links,
+                'coinImages': coinImages,
+                'seriesImages': seriesImages,
+            }
+        except Exception:
+            return {}
+
+    async def pull_all(self, policy: str = 'prefer_local') -> Dict[str, Any]:
+        """Download files from remote WebDAV into local save_path (file-level pull + DB import when DB found).
+        Returns summary.
+        """
+        settings = await asyncio.to_thread(db.load_app_settings)
+        webdav = settings.get('sync', {}).get('webdav', {}) if isinstance(settings.get('sync', {}), dict) else {}
+        url = webdav.get('url') if isinstance(webdav, dict) else ''
+        if not url:
+            raise ValueError('WebDAV url not configured')
+
+        user = webdav.get('username') or ''
+        enc_pw = webdav.get('password') or ''
+        try:
+            pw = crypto.decrypt_string(enc_pw) if enc_pw else ''
+        except Exception:
+            pw = enc_pw or ''
+        auth = (user, pw) if user or pw else None
+        remote_root = webdav.get('remote_path') or ''
+
+        # fetch remote marker timestamp if available
+        meta_rel = '.coinscape/last_cloud_backup.txt'
+        remote_ts = None
+        try:
+            meta_url = self._build_remote_url(url, remote_root, meta_rel)
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                try:
+                    resp = await self._request_with_retry(client, 'GET', meta_url, auth=auth, timeout=20.0, max_attempts=2)
+                    if resp is not None and resp.status_code in (200, 201):
+                        try:
+                            j = resp.json()
+                            if isinstance(j, dict) and 'timestamp' in j:
+                                remote_ts = j.get('timestamp')
+                            else:
+                                text = (resp.text or '').strip()
+                                if text:
+                                    remote_ts = text
+                        except Exception:
+                            text = (resp.text or '').strip()
+                            if text:
+                                remote_ts = text
+                except Exception:
+                    pass
+        except Exception:
+            remote_ts = None
+
+        downloaded = 0
+        failed = 0
+        imported_db = False
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            files = await self._list_remote_files(client, url, remote_root, auth)
+            for f in files:
+                href = f.get('href')
+                rel = self._relpath_from_remote_href(url, remote_root, href)
+                if not rel:
+                    continue
+                # skip marker file
+                if rel.startswith('.coinscape'):
+                    continue
+                # skip coinscape.log
+                if rel.endswith('coinscape.log') or rel.split('/')[-1] == 'coinscape.log':
+                    continue
+
+                target_local = os.path.join(self.save_path, rel.replace('/', os.sep))
+                os.makedirs(os.path.dirname(target_local), exist_ok=True)
+
+                try:
+                    get_resp = await self._request_with_retry(client, 'GET', href, auth=auth, timeout=120.0, max_attempts=3)
+                except Exception as e:
+                    await asyncio.to_thread(self._db_mark_queue_failed, -1, f'pull_get_error:{rel}:{e}')
+                    failed += 1
+                    continue
+
+                if get_resp is None or get_resp.status_code not in (200, 201):
+                    await asyncio.to_thread(self._db_mark_queue_failed, -1, f'pull_get_status:{rel}:{get_resp.status_code if get_resp is not None else "none"}')
+                    failed += 1
+                    continue
+
+                # write file
+                try:
+                    with open(target_local + '.tmp', 'wb') as fh:
+                        fh.write(get_resp.content)
+                    os.replace(target_local + '.tmp', target_local)
+                except Exception as e:
+                    await asyncio.to_thread(self._db_mark_queue_failed, -1, f'pull_write_error:{rel}:{e}')
+                    failed += 1
+                    continue
+
+                # update file_index
+                etag = get_resp.headers.get('ETag') or get_resp.headers.get('etag')
+                last_synced_at = remote_ts or datetime.utcnow().isoformat()
+                await asyncio.to_thread(self._db_update_file_index_after_upload, rel, last_synced_at, href, etag)
+                downloaded += 1
+
+                # if this is the sqlite DB file, extract and merge-import according to policy
+                if rel == 'db/coinscape.db':
+                    try:
+                        temp_db_path = target_local
+                        data = await asyncio.to_thread(self._extract_data_from_sqlite_file, temp_db_path)
+                        if data:
+                            # perform non-destructive merge into server DB according to policy
+                            await asyncio.to_thread(db.import_merge_data, data, policy)
+                            imported_db = True
+                    except Exception as e:
+                        await asyncio.to_thread(self._db_mark_queue_failed, -1, f'db_import_error:{e}')
+                        failed += 1
+
+        # After all files processed, update local last_local_change to remote marker timestamp if available
+        if remote_ts:
+            try:
+                await asyncio.to_thread(db.update_app_settings, {'sync': {'last_local_change': remote_ts}})
+            except Exception:
+                pass
+
+        return {'downloaded': downloaded, 'failed': failed, 'imported_db': imported_db, 'remote_marker': remote_ts}
 
     async def process_queue(self, webdav_cfg: Dict[str, Any], max_attempts: int = 3) -> Dict[str, int]:
         """
@@ -243,37 +579,42 @@ class FileSyncManager:
 
         auth = (user, pw) if user or pw else None
 
-        conn = self._get_conn()
-        cur = conn.cursor()
-
+        # Use thread-safe DB helpers via asyncio.to_thread to avoid blocking event loop
         processed = 0
         succeeded = 0
         failed = 0
 
         async with httpx.AsyncClient(timeout=60.0) as client:
             while True:
-                cur.execute("SELECT * FROM sync_queue WHERE status = 'pending' ORDER BY id LIMIT 1")
-                row = cur.fetchone()
+                row = await asyncio.to_thread(self._db_fetch_pending_task)
                 if not row:
                     break
 
                 task_id = row['id']
+                prev_attempts = int(row.get('attempts') or 0)
+                if prev_attempts >= max_attempts:
+                    # give up and mark as permanently failed
+                    await asyncio.to_thread(self._db_mark_queue_failed, task_id, f'max_attempts_exceeded:{prev_attempts}')
+                    failed += 1
+                    processed += 1
+                    continue
+
                 rel_path = row['path']
                 action = row['action']
 
-                # mark in-progress
-                cur.execute("UPDATE sync_queue SET status = 'in-progress', attempts = attempts + 1, last_attempt_at = ? WHERE id = ?", (datetime.utcnow().isoformat(), task_id))
-                conn.commit()
+                # mark in-progress (increments attempts)
+                await asyncio.to_thread(self._db_mark_in_progress, task_id)
 
                 try:
                     if action == 'upload':
                         local = os.path.join(self.save_path, rel_path)
                         if not os.path.isfile(local):
                             # file missing locally, mark failed
-                            cur.execute("UPDATE sync_queue SET status = 'failed', error = ? WHERE id = ?", ('local_missing', task_id))
-                            conn.commit()
+                            await asyncio.to_thread(self._db_mark_queue_failed, task_id, 'local_missing')
                             failed += 1
+                            processed += 1
                             continue
+
                         target_url = self._build_remote_url(url, remote_root, rel_path)
 
                         # construct temporary upload URL by appending .part suffix to the path
@@ -291,31 +632,34 @@ class FileSyncManager:
                         try:
                             data = await asyncio.to_thread(lambda: open(local, 'rb').read())
                         except Exception as e:
-                            cur.execute("UPDATE sync_queue SET status = 'failed', error = ? WHERE id = ?", (str(e), task_id))
-                            conn.commit()
+                            await asyncio.to_thread(self._db_mark_queue_failed, task_id, str(e))
                             failed += 1
+                            processed += 1
                             continue
 
-                        # upload to temporary path first
+                        # upload to temporary path first (with retries)
                         try:
-                            put_tmp = await client.put(tmp_url, content=data, auth=auth)
+                            put_tmp = await self._request_with_retry(client, 'PUT', tmp_url, auth=auth, content=data, timeout=60.0, max_attempts=3)
                         except Exception as e:
-                            cur.execute("UPDATE sync_queue SET status = 'failed', error = ? WHERE id = ?", (f'put_tmp_error:{e}', task_id))
-                            conn.commit()
+                            await asyncio.to_thread(self._db_mark_queue_failed, task_id, f'put_tmp_error:{e}')
                             failed += 1
+                            processed += 1
                             continue
 
-                        if put_tmp.status_code in (200, 201, 204):
+                        if put_tmp is not None and put_tmp.status_code in (200, 201, 204):
                             # attempt atomic MOVE from tmp -> target
                             move_headers = {'Destination': target_url, 'Overwrite': 'T'}
                             try:
-                                move_resp = await client.request('MOVE', tmp_url, headers=move_headers, auth=auth)
-                                if move_resp.status_code in (200, 201, 204):
+                                try:
+                                    move_resp = await self._request_with_retry(client, 'MOVE', tmp_url, headers=move_headers, auth=auth, timeout=60.0, max_attempts=3)
+                                except Exception as e:
+                                    move_resp = None
+                                if move_resp is not None and move_resp.status_code in (200, 201, 204):
                                     # try to fetch ETag from target via HEAD, fallback to put_tmp's ETag
                                     etag = None
                                     try:
-                                        head_resp = await client.head(target_url, auth=auth)
-                                        if head_resp.status_code in (200, 201):
+                                        head_resp = await self._request_with_retry(client, 'HEAD', target_url, auth=auth, timeout=30.0, max_attempts=2)
+                                        if head_resp is not None and head_resp.status_code in (200, 201):
                                             etag = head_resp.headers.get('ETag') or head_resp.headers.get('etag')
                                     except Exception:
                                         pass
@@ -323,90 +667,106 @@ class FileSyncManager:
                                         etag = put_tmp.headers.get('ETag') or put_tmp.headers.get('etag')
 
                                     now = datetime.utcnow().isoformat()
-                                    cur.execute("UPDATE file_index SET last_synced_at = ?, remote_path = ?, remote_etag = ? WHERE path = ?",
-                                                (now, target_url, etag, rel_path))
-                                    cur.execute("UPDATE sync_queue SET status = 'done', error = NULL WHERE id = ?", (task_id,))
-                                    conn.commit()
+                                    await asyncio.to_thread(self._db_update_file_index_after_upload, rel_path, now, target_url, etag)
+                                    await asyncio.to_thread(self._db_mark_queue_done, task_id)
                                     succeeded += 1
                                 else:
                                     # MOVE failed -> try fallback: PUT directly to target, then cleanup tmp
                                     try:
-                                        put_final = await client.put(target_url, content=data, auth=auth)
-                                        if put_final.status_code in (200, 201, 204):
+                                        try:
+                                            put_final = await self._request_with_retry(client, 'PUT', target_url, auth=auth, content=data, timeout=60.0, max_attempts=3)
+                                        except Exception as e:
+                                            put_final = None
+                                        if put_final is not None and put_final.status_code in (200, 201, 204):
                                             # attempt to delete tmp
                                             try:
-                                                await client.delete(tmp_url, auth=auth)
+                                                await self._request_with_retry(client, 'DELETE', tmp_url, auth=auth, timeout=30.0, max_attempts=2)
                                             except Exception:
                                                 pass
                                             etag = put_final.headers.get('ETag') or put_final.headers.get('etag')
                                             now = datetime.utcnow().isoformat()
-                                            cur.execute("UPDATE file_index SET last_synced_at = ?, remote_path = ?, remote_etag = ? WHERE path = ?",
-                                                        (now, target_url, etag, rel_path))
-                                            cur.execute("UPDATE sync_queue SET status = 'done', error = NULL WHERE id = ?", (task_id,))
-                                            conn.commit()
+                                            await asyncio.to_thread(self._db_update_file_index_after_upload, rel_path, now, target_url, etag)
+                                            await asyncio.to_thread(self._db_mark_queue_done, task_id)
                                             succeeded += 1
                                         else:
                                             # cleanup tmp and mark failed
                                             try:
-                                                await client.delete(tmp_url, auth=auth)
+                                                await self._request_with_retry(client, 'DELETE', tmp_url, auth=auth, timeout=30.0, max_attempts=2)
                                             except Exception:
                                                 pass
-                                            err = f'move_failed:{move_resp.status_code}, put_target:{put_final.status_code}'
-                                            cur.execute("UPDATE sync_queue SET status = 'failed', error = ? WHERE id = ?", (err, task_id))
-                                            conn.commit()
+                                            put_final_status = put_final.status_code if put_final is not None else 'none'
+                                            err = f'move_failed:{move_resp.status_code}, put_target:{put_final_status}'
+                                            await asyncio.to_thread(self._db_mark_queue_failed, task_id, err)
                                             failed += 1
                                     except Exception as e:
                                         try:
-                                            await client.delete(tmp_url, auth=auth)
+                                            await self._request_with_retry(client, 'DELETE', tmp_url, auth=auth, timeout=30.0, max_attempts=2)
                                         except Exception:
                                             pass
-                                        cur.execute("UPDATE sync_queue SET status = 'failed', error = ? WHERE id = ?", (f'fallback_put_error:{e}', task_id))
-                                        conn.commit()
+                                        await asyncio.to_thread(self._db_mark_queue_failed, task_id, f'fallback_put_error:{e}')
                                         failed += 1
                             except Exception as e:
                                 # MOVE request failed entirely; try to cleanup tmp and mark failed
                                 try:
-                                    await client.delete(tmp_url, auth=auth)
+                                    await self._request_with_retry(client, 'DELETE', tmp_url, auth=auth, timeout=30.0, max_attempts=2)
                                 except Exception:
                                     pass
-                                cur.execute("UPDATE sync_queue SET status = 'failed', error = ? WHERE id = ?", (f'move_error:{e}', task_id))
-                                conn.commit()
+                                await asyncio.to_thread(self._db_mark_queue_failed, task_id, f'move_error:{e}')
                                 failed += 1
                         else:
-                            err = f'put_tmp_failed:{put_tmp.status_code}'
-                            cur.execute("UPDATE sync_queue SET status = 'failed', error = ? WHERE id = ?", (err, task_id))
-                            conn.commit()
-                            failed += 1
+                            # tmp PUT failed -- try direct PUT to target as a fallback (with retry)
+                            try:
+                                try:
+                                    put_final = await self._request_with_retry(client, 'PUT', target_url, auth=auth, content=data, timeout=60.0, max_attempts=3)
+                                except Exception as e:
+                                    put_final = None
+                                if put_final is not None and put_final.status_code in (200, 201, 204):
+                                    try:
+                                        await self._request_with_retry(client, 'DELETE', tmp_url, auth=auth, timeout=30.0, max_attempts=2)
+                                    except Exception:
+                                        pass
+                                    etag = put_final.headers.get('ETag') or put_final.headers.get('etag')
+                                    now = datetime.utcnow().isoformat()
+                                    await asyncio.to_thread(self._db_update_file_index_after_upload, rel_path, now, target_url, etag)
+                                    await asyncio.to_thread(self._db_mark_queue_done, task_id)
+                                    succeeded += 1
+                                else:
+                                    put_final_status = put_final.status_code if put_final is not None else 'none'
+                                    err = f'put_tmp_failed:{put_tmp.status_code}, put_target:{put_final_status}'
+                                    await asyncio.to_thread(self._db_mark_queue_failed, task_id, err)
+                                    failed += 1
+                            except Exception as e:
+                                logger.exception('put_tmp failed and fallback put raised exception')
+                                await asyncio.to_thread(self._db_mark_queue_failed, task_id, f'put_tmp_error_and_fallback_failed:{e}')
+                                failed += 1
 
                     elif action == 'delete':
                         target_url = self._build_remote_url(url, remote_root, rel_path)
                         try:
-                            resp = await client.delete(target_url, auth=auth)
+                            try:
+                                resp = await self._request_with_retry(client, 'DELETE', target_url, auth=auth, timeout=60.0, max_attempts=3)
+                            except Exception as e:
+                                resp = None
                             # treat 200/204/404 as success (404 means already removed)
-                            if resp.status_code in (200, 204, 404):
+                            if resp is not None and resp.status_code in (200, 204, 404):
                                 # remove index entry
-                                cur.execute("DELETE FROM file_index WHERE path = ?", (rel_path,))
-                                cur.execute("UPDATE sync_queue SET status = 'done', error = NULL WHERE id = ?", (task_id,))
-                                conn.commit()
+                                await asyncio.to_thread(self._db_delete_index_entry, rel_path)
+                                await asyncio.to_thread(self._db_mark_queue_done, task_id)
                                 succeeded += 1
                             else:
-                                err = f'delete_failed:{resp.status_code}'
-                                cur.execute("UPDATE sync_queue SET status = 'failed', error = ? WHERE id = ?", (err, task_id))
-                                conn.commit()
+                                status = resp.status_code if resp is not None else 'none'
+                                err = f'delete_failed:{status}'
+                                await asyncio.to_thread(self._db_mark_queue_failed, task_id, err)
                                 failed += 1
                         except Exception as e:
-                            cur.execute("UPDATE sync_queue SET status = 'failed', error = ? WHERE id = ?", (str(e), task_id))
-                            conn.commit()
+                            await asyncio.to_thread(self._db_mark_queue_failed, task_id, str(e))
                             failed += 1
 
                 except Exception as e:
-                    cur.execute("UPDATE sync_queue SET status = 'failed', error = ? WHERE id = ?", (str(e), task_id))
-                    conn.commit()
+                    await asyncio.to_thread(self._db_mark_queue_failed, task_id, str(e))
                     failed += 1
 
                 processed += 1
-
-        conn.close()
 
         return {'processed': processed, 'succeeded': succeeded, 'failed': failed}
 
@@ -424,22 +784,195 @@ class FileSyncManager:
         conn.close()
         return {'pending': pending, 'in_progress': inprog, 'failed': failed, 'done': done}
 
-    async def push_all(self) -> Dict[str, Any]:
+    def get_full_queue(self) -> List[Dict[str, Any]]:
+        """Return the full sync_queue table rows for inspection.
+        Each item: {id, path, action, status, attempts, last_attempt_at, error}
+        """
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT id, path, action, status, attempts, last_attempt_at, error FROM sync_queue ORDER BY id")
+        rows = [dict(r) for r in cur.fetchall()]
+        conn.close()
+        return rows
+
+    # --- Thread-safe DB helpers (synchronous, intended to be called via asyncio.to_thread) ---
+    def _db_fetch_pending_task(self) -> Optional[Dict[str, Any]]:
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM sync_queue WHERE status = 'pending' ORDER BY id LIMIT 1")
+        row = cur.fetchone()
+        conn.close()
+        return dict(row) if row else None
+
+    def _db_mark_in_progress(self, task_id: int):
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute("UPDATE sync_queue SET status = 'in-progress', attempts = attempts + 1, last_attempt_at = ? WHERE id = ?",
+                    (datetime.utcnow().isoformat(), task_id))
+        conn.commit()
+        conn.close()
+
+    def _db_mark_queue_done(self, task_id: int):
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute("UPDATE sync_queue SET status = 'done', error = NULL WHERE id = ?", (task_id,))
+        conn.commit()
+        conn.close()
+
+    def _db_mark_queue_failed(self, task_id: int, error: str):
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute("UPDATE sync_queue SET status = 'failed', error = ? WHERE id = ?", (error, task_id))
+        conn.commit()
+        conn.close()
+
+    def _db_update_file_index_after_upload(self, rel_path: str, last_synced_at: str, remote_path: str, remote_etag: Optional[str]):
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute("UPDATE file_index SET last_synced_at = ?, remote_path = ?, remote_etag = ? WHERE path = ?",
+                    (last_synced_at, remote_path, remote_etag, rel_path))
+        conn.commit()
+        conn.close()
+
+    def _db_delete_index_entry(self, rel_path: str):
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM file_index WHERE path = ?", (rel_path,))
+        conn.commit()
+        conn.close()
+
+    def _db_retry_failed(self):
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute("UPDATE sync_queue SET status = 'pending', error = NULL WHERE status = 'failed'")
+        conn.commit()
+        conn.close()
+
+    def _db_clear_failed(self):
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM sync_queue WHERE status = 'failed'")
+        conn.commit()
+        conn.close()
+
+    async def _request_with_retry(self, client: httpx.AsyncClient, method: str, url: str, *,
+                                  auth: Optional[tuple] = None, headers: Optional[dict] = None,
+                                  content: Optional[bytes] = None, timeout: Optional[float] = None,
+                                  max_attempts: int = 3, backoff_factor: float = 0.5) -> httpx.Response:
+        """Perform an HTTP request with simple exponential backoff retry for 5xx/429 errors and exceptions.
+        Returns the final httpx.Response or raises the last exception if all attempts fail.
+        """
+        attempt = 1
+        last_exc = None
+        while attempt <= max_attempts:
+            try:
+                resp = await client.request(method, url, auth=auth, headers=headers, content=content, timeout=timeout)
+                status = resp.status_code
+                # Retry on server errors or 429 (rate limit)
+                if status >= 500 or status == 429:
+                    if attempt < max_attempts:
+                        sleep_t = backoff_factor * (2 ** (attempt - 1)) + random.uniform(0, backoff_factor)
+                        await asyncio.sleep(sleep_t)
+                        attempt += 1
+                        continue
+                return resp
+            except Exception as e:
+                last_exc = e
+                if attempt < max_attempts:
+                    sleep_t = backoff_factor * (2 ** (attempt - 1)) + random.uniform(0, backoff_factor)
+                    await asyncio.sleep(sleep_t)
+                    attempt += 1
+                    continue
+                raise
+        if last_exc:
+            raise last_exc
+        # Fallback: raise generic
+        raise RuntimeError('Request failed without exception')
+
+    def get_detailed_status(self, limit: int = 100) -> Dict[str, Any]:
+        """Return a detailed status structure compatible with frontend expectations.
+        Structure example:
+        {
+            'counts': {'pending': int, 'in_progress': int, 'failed': int, 'done': int},
+            'in_progress': [ {id, path, action, attempts, error}, ... ],
+            'failed': [ {id, path, action, attempts, error}, ... ],
+            'pending_preview': [ {id, path, action}, ... ]
+        }
+        """
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) as c FROM sync_queue WHERE status = 'pending'")
+        pending = cur.fetchone()['c']
+        cur.execute("SELECT COUNT(*) as c FROM sync_queue WHERE status = 'in-progress'")
+        inprog = cur.fetchone()['c']
+        cur.execute("SELECT COUNT(*) as c FROM sync_queue WHERE status = 'failed'")
+        failed = cur.fetchone()['c']
+        cur.execute("SELECT COUNT(*) as c FROM sync_queue WHERE status = 'done'")
+        done = cur.fetchone()['c']
+
+        # fetch rows
+        cur.execute("SELECT id, path, action, attempts, error FROM sync_queue WHERE status = 'in-progress'")
+        inprog_rows = [dict(r) for r in cur.fetchall()]
+        cur.execute("SELECT id, path, action, attempts, error FROM sync_queue WHERE status = 'failed'")
+        failed_rows = [dict(r) for r in cur.fetchall()]
+        # pending preview (limit)
+        cur.execute("SELECT id, path, action FROM sync_queue WHERE status = 'pending' ORDER BY id LIMIT ?", (limit,))
+        pending_rows = [dict(r) for r in cur.fetchall()]
+
+        conn.close()
+
+        return {
+            'counts': {'pending': pending, 'in_progress': inprog, 'failed': failed, 'done': done},
+            'in_progress': inprog_rows,
+            'failed': failed_rows,
+            'pending_preview': pending_rows,
+        }
+
+    async def push_all(self, force: bool = False) -> Dict[str, Any]:
         # single-run guard
         if not self._lock.acquire(blocking=False):
             return {'started': False, 'reason': 'already_running'}
         try:
             logger.info('Starting file sync scan')
-            scan_summary = self.scan_and_queue()
-            # load webdav settings
+            # run scan in thread pool to avoid blocking event loop
+            scan_summary = await asyncio.to_thread(self.scan_and_queue, force)
+            # load webdav settings (offload to thread to avoid blocking)
             try:
-                settings = db.load_app_settings()
+                settings = await asyncio.to_thread(db.load_app_settings)
                 webdav = settings.get('sync', {}).get('webdav', {}) if isinstance(settings.get('sync', {}), dict) else {}
             except Exception:
                 webdav = {}
 
             proc = await self.process_queue(webdav)
-            return {'started': True, 'scan': scan_summary, 'process': proc}
+
+            # Attempt to write a remote backup marker (timestamp) into WebDAV so other devices can see latest backup
+            remote_marker_set = False
+            last_cloud_backup = None
+            try:
+                # prefer using local last_local_change timestamp when available
+                local_ts = None
+                try:
+                    local_ts = settings.get('sync', {}).get('last_local_change') if isinstance(settings.get('sync', {}), dict) else None
+                except Exception:
+                    local_ts = None
+
+                iso_to_write = local_ts or datetime.utcnow().isoformat()
+                try:
+                    remote_marker_set = await self._write_remote_backup_marker(webdav, iso_to_write)
+                except Exception:
+                    remote_marker_set = False
+                if remote_marker_set:
+                    last_cloud_backup = iso_to_write
+            except Exception:
+                logger.exception('Failed to set remote backup marker')
+
+            return {
+                'started': True,
+                'scan': scan_summary,
+                'process': proc,
+                'remote_marker_set': remote_marker_set,
+                'last_cloud_backup': last_cloud_backup,
+            }
         finally:
             self._lock.release()
 

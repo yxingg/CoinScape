@@ -1,7 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:path/path.dart' as p;
 import 'package:flutter/widgets.dart';
 
 // This script is intended to be run with `dart run tool/test_file_sync.dart` inside the project root.
@@ -10,7 +9,7 @@ import 'package:flutter/widgets.dart';
 // and call FileSyncManager.instance.pushAll(cfg) to run a test push.
 
 import '../lib/services/file_sync.dart' as file_sync;
-import '../lib/services/api_service.dart';
+// api_service not used in this tool script - removed unused import
 import '../lib/services/local_config_service.dart';
 
 Future<Map<String, dynamic>> _loadWebDavConfigFromLocal() async {

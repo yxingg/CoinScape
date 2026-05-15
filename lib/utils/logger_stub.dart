@@ -1,62 +1,34 @@
-import 'dart:html' as html;
-import 'package:flutter/foundation.dart';
+// 默认平台存根：不依赖 `dart:html`，提供安全的 no-op 实现
+import 'dart:async';
 
 Future<String?> initLogWriter() async {
-  // Web平台使用localStorage存储日志
-  // 返回虚拟路径用于标识
-  return 'web://localStorage/logs/coinscape.log';
+  // 默认实现不提供持久化日志路径
+  return null;
 }
 
 Future<void> appendLog(String line) async {
-  try {
-    // 尝试使用localStorage存储日志
-    final storage = html.window.localStorage;
-    const key = 'coinscape_logs';
-    
-    // 获取现有的日志
-    String existingLogs = storage[key] ?? '';
-    
-    // 添加新日志行
-    final updatedLogs = '$existingLogs$line\n';
-    
-    // 限制日志大小（最多保留最近1000行）
-    final lines = updatedLogs.split('\n');
-    if (lines.length > 1000) {
-      // 只保留最近1000行
-      final recentLines = lines.sublist(lines.length - 1000);
-      storage[key] = recentLines.join('\n');
-    } else {
-      storage[key] = updatedLogs;
-    }
-    } catch (e) {
-    // 如果localStorage失败，至少打印到控制台
-    debugPrint('Web日志存储失败: $e\n原始日志: $line');
-  }
+  // 默认不写入任何外部存储，仅保留在控制台（由 AppLogger 处理）
+  return;
 }
 
-/// 日志配置类存根（Web平台）
+/// 日志配置类存根（默认实现）
 class LogConfig {
   static Future<String?> getConfiguredLogPath() async {
-    return 'web://localStorage/logs/coinscape.log';
+    return null;
   }
-  
+
   static Future<void> setLogPath(String path) async {
-    // Web平台忽略路径设置
+    // 默认为空实现
     return;
   }
-  
-  /// 清空Web平台日志
+
+  /// Web 专用的清理接口在默认实现下为空
   static Future<void> clearWebLogs() async {
-    try {
-      final storage = html.window.localStorage;
-      storage.remove('coinscape_logs');
-    } catch (e) {
-      debugPrint('清空Web日志失败: $e');
-    }
+    return;
   }
 
   /// 通用清空日志接口（供 AppLogger 调用）
   static Future<void> clearLogs() async {
-    await clearWebLogs();
+    return;
   }
 }

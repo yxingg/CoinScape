@@ -8,7 +8,11 @@ Data is stored in SAVE_PATH directory on the local filesystem.
 import sqlite3
 import json
 import os
-from . import crypto
+import copy
+try:
+    from . import crypto
+except Exception:
+    import crypto
 import shutil
 from datetime import datetime
 from typing import Optional, Dict, Any
@@ -322,13 +326,32 @@ def replace_series_images(series_id: str, image_paths: list[str]):
 
 def export_all_data() -> dict:
     """Export all data as a JSON-serializable dict."""
-    return {
+    data = {
         "series": get_all_series(),
         "coins": get_all_coins(),
         "links": fetch_all("coin_series_link"),
         "coinImages": fetch_all("coin_images"),
         "seriesImages": fetch_all("series_images"),
     }
+
+    # Include settings (mask sensitive fields)
+    try:
+        settings = load_app_settings()
+        settings_copy = copy.deepcopy(settings)
+        # Mask webdav password
+        try:
+            if isinstance(settings_copy.get('sync'), dict):
+                webdav = settings_copy['sync'].get('webdav') if isinstance(settings_copy['sync'].get('webdav'), dict) else None
+                if webdav is not None:
+                    if 'password' in webdav:
+                        webdav['password'] = ''
+        except Exception:
+            pass
+        data['settings'] = settings_copy
+    except Exception:
+        data['settings'] = {}
+
+    return data
 
 
 def import_all_data(data: dict):
@@ -387,6 +410,150 @@ def import_all_data(data: dict):
             (img["id"], img["series_id"], img["image_path"], img.get("sort_order", 0))
 )
     
+    conn.commit()
+    conn.close()
+
+
+def import_merge_data(data: dict, policy: str = 'prefer_local'):
+    """Merge import from `data` into existing DB.
+
+    policy:
+      - 'prefer_local' (default): keep existing local rows, only insert missing rows from remote.
+      - 'prefer_remote': overwrite local rows with remote values.
+      - 'merge_fields': for each column, prefer local value unless empty/NULL, then use remote.
+    This function never deletes local rows that are missing from the import; it only inserts or updates.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+
+    def _coalesce(a, b):
+        return a if a not in (None, '') else b
+
+    # Series
+    for s in data.get('series', []):
+        sid = s.get('id')
+        if not sid:
+            continue
+        cur.execute("SELECT * FROM series WHERE id = ?", (sid,))
+        existing = cur.fetchone()
+        if not existing:
+            cur.execute(
+                "INSERT INTO series (id, name, description, created_at) VALUES (?, ?, ?, ?)",
+                (sid, s.get('name'), s.get('description'), s.get('created_at') or datetime.now().isoformat())
+            )
+        else:
+            if policy == 'prefer_remote':
+                cur.execute(
+                    "UPDATE series SET name = ?, description = ?, created_at = ? WHERE id = ?",
+                    (s.get('name'), s.get('description'), s.get('created_at') or existing['created_at'], sid)
+                )
+            elif policy == 'merge_fields':
+                name = _coalesce(existing['name'], s.get('name'))
+                description = _coalesce(existing['description'], s.get('description'))
+                created_at = _coalesce(existing['created_at'], s.get('created_at') or existing['created_at'])
+                cur.execute(
+                    "UPDATE series SET name = ?, description = ?, created_at = ? WHERE id = ?",
+                    (name, description, created_at, sid)
+                )
+            # prefer_local -> do nothing
+
+    # Coins
+    coin_cols = [
+        'id', 'name', 'year', 'face_value', 'material', 'weight', 'diameter', 'mintage', 'mint', 'grade',
+        'unit_price', 'quantity', 'quantity_unit', 'collection_time', 'created_at', 'comments', 'first_image_path'
+    ]
+    for c in data.get('coins', []):
+        cid = c.get('id')
+        if not cid:
+            continue
+        cur.execute("SELECT * FROM coins WHERE id = ?", (cid,))
+        existing = cur.fetchone()
+        if not existing:
+            values = [c.get(col) for col in coin_cols]
+            # ensure created_at
+            if not values[14]:
+                values[14] = datetime.now().isoformat()
+            placeholders = ','.join(['?'] * len(coin_cols))
+            cur.execute(f"INSERT INTO coins ({','.join(coin_cols)}) VALUES ({placeholders})", tuple(values))
+        else:
+            if policy == 'prefer_remote':
+                values = [c.get(col) for col in coin_cols[1:]]  # exclude id
+                set_clause = ','.join([f"{col} = ?" for col in coin_cols[1:]])
+                cur.execute(f"UPDATE coins SET {set_clause} WHERE id = ?", tuple(values + [cid]))
+            elif policy == 'merge_fields':
+                updates = []
+                params = []
+                for col in coin_cols[1:]:
+                    local_val = existing[col]
+                    remote_val = c.get(col)
+                    chosen = local_val if local_val not in (None, '') else remote_val
+                    updates.append(f"{col} = ?")
+                    params.append(chosen)
+                params.append(cid)
+                cur.execute(f"UPDATE coins SET {', '.join(updates)} WHERE id = ?", tuple(params))
+            # prefer_local -> do nothing
+
+    # Links (coin_series_link) - insert remote links, do not delete local links
+    for l in data.get('links', []):
+        try:
+            cur.execute("INSERT OR IGNORE INTO coin_series_link (coin_id, series_id) VALUES (?, ?)", (l.get('coin_id'), l.get('series_id')))
+        except Exception:
+            pass
+
+    # Coin images
+    for img in data.get('coinImages', []):
+        iid = img.get('id')
+        if not iid:
+            continue
+        cur.execute("SELECT * FROM coin_images WHERE id = ?", (iid,))
+        existing = cur.fetchone()
+        if not existing:
+            cur.execute(
+                "INSERT OR REPLACE INTO coin_images (id, coin_id, image_path, sort_order) VALUES (?, ?, ?, ?)",
+                (iid, img.get('coin_id'), img.get('image_path'), img.get('sort_order', 0))
+            )
+        else:
+            if policy == 'prefer_remote':
+                cur.execute(
+                    "UPDATE coin_images SET coin_id = ?, image_path = ?, sort_order = ? WHERE id = ?",
+                    (img.get('coin_id'), img.get('image_path'), img.get('sort_order', 0), iid)
+                )
+            elif policy == 'merge_fields':
+                coin_id = _coalesce(existing['coin_id'], img.get('coin_id'))
+                image_path = _coalesce(existing['image_path'], img.get('image_path'))
+                sort_order = existing['sort_order'] if existing['sort_order'] not in (None, '') else img.get('sort_order', 0)
+                cur.execute(
+                    "UPDATE coin_images SET coin_id = ?, image_path = ?, sort_order = ? WHERE id = ?",
+                    (coin_id, image_path, sort_order, iid)
+                )
+
+    # Series images
+    for img in data.get('seriesImages', []):
+        iid = img.get('id')
+        if not iid:
+            continue
+        cur.execute("SELECT * FROM series_images WHERE id = ?", (iid,))
+        existing = cur.fetchone()
+        if not existing:
+            cur.execute(
+                "INSERT OR REPLACE INTO series_images (id, series_id, image_path, sort_order) VALUES (?, ?, ?, ?)",
+                (iid, img.get('series_id'), img.get('image_path'), img.get('sort_order', 0))
+            )
+        else:
+            if policy == 'prefer_remote':
+                cur.execute(
+                    "UPDATE series_images SET series_id = ?, image_path = ?, sort_order = ? WHERE id = ?",
+                    (img.get('series_id'), img.get('image_path'), img.get('sort_order', 0), iid)
+                )
+            elif policy == 'merge_fields':
+                series_id = _coalesce(existing['series_id'], img.get('series_id'))
+                image_path = _coalesce(existing['image_path'], img.get('image_path'))
+                sort_order = existing['sort_order'] if existing['sort_order'] not in (None, '') else img.get('sort_order', 0)
+                cur.execute(
+                    "UPDATE series_images SET series_id = ?, image_path = ?, sort_order = ? WHERE id = ?",
+                    (series_id, image_path, sort_order, iid)
+                )
+
     conn.commit()
     conn.close()
 
@@ -464,7 +631,8 @@ def load_app_settings() -> Dict[str, Any]:
                 "username": "",
                 "password": "",
                 "remote_path": ""
-            }
+                },
+                "merge_policy": "prefer_local"
         },
         "backend": {
             "save_path": None,

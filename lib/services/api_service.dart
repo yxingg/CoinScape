@@ -358,12 +358,36 @@ class ApiService {
 
   /// Trigger server-side file sync push (scan + incremental upload)
   static Future<Map<String, dynamic>> startFileSyncPush() async {
-    return await _post('/sync/files/push', {});
+    return await _post('/sync/files/push', {'force': true});
+  }
+
+  /// Trigger server-side file-level pull from WebDAV
+  static Future<Map<String, dynamic>> startFileSyncPull() async {
+    return await _post('/sync/files/pull', {});
+  }
+
+  static Future<Map<String, dynamic>> startFileSyncPullWithPolicy(String policy) async {
+    return await _post('/sync/files/pull', {'policy': policy});
+  }
+
+  /// Scan local files and enqueue pending upload/delete tasks (no upload yet)
+  static Future<Map<String, dynamic>> startFileSyncScan({bool force = false}) async {
+    return await _post('/sync/files/scan', {'force': force});
+  }
+
+  /// Get full sync queue entries
+  static Future<Map<String, dynamic>> getFileSyncQueue() async {
+    return await _get('/sync/files/queue');
   }
 
   /// Get current file sync status (counts of pending/in_progress/done/failed)
   static Future<Map<String, dynamic>> getFileSyncStatus() async {
     return await _get('/sync/files/status');
+  }
+
+  /// Retry previously failed sync queue entries, or clear them when `clear=true`.
+  static Future<Map<String, dynamic>> retryFailedSync({bool clear = false}) async {
+    return await _post('/sync/files/retry_failed', {'clear': clear});
   }
 }
 

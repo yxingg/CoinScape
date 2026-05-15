@@ -180,6 +180,7 @@ class AppSettings {
     final backend = json['backend'] as Map<String, dynamic>? ?? {};
     final sync = json['sync'] as Map<String, dynamic>? ?? {};
     final webdav = sync['webdav'] as Map<String, dynamic>? ?? {};
+    final mergePolicy = sync['merge_policy'] as String? ?? sync['mergePolicy'] as String? ?? 'prefer_local';
 
     return AppSettings(
       displayFontId: appearance['display_font'] as String? ?? 'default',
@@ -199,6 +200,7 @@ class AppSettings {
       // treat it as "set but hidden" and leave the UI password empty.
       webDavPassword: (webdav['password'] as String? ?? '').startsWith('enc:') ? '' : (webdav['password'] as String? ?? ''),
       webDavProxyEnabled: webdav['enabled'] as bool? ?? false,
+      // store merge policy locally in webdav password field? No; we will handle separately via SettingsNotifier update
     );
   }
 }
