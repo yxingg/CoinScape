@@ -33,6 +33,19 @@ class LocalConfigService {
       if (file != null && await file.exists()) {
         final content = await file.readAsString();
         _cache = jsonDecode(content) as Map<String, dynamic>;
+        // 平台劫持：在原始 JSON 中保留字段结构，但在 Android/iOS 等原生平台执行 IO 时，
+        // 强制将 backend.save_path 重定向到应用私有目录，避免使用不可用的外部路径。
+        try {
+          final dir = await getApplicationDocumentsDirectory();
+          final backend = _cache!['backend'] as Map<String, dynamic>?;
+          if (backend != null) {
+            backend['save_path'] = dir.path;
+          } else {
+            _cache!['backend'] = {'save_path': dir.path};
+          }
+        } catch (e) {
+          // 忽略重定向失败，保留原始配置
+        }
         AppLogger.info('Config', '已加载本地配置文件');
         return _cache!;
       }

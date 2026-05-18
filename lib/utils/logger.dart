@@ -258,4 +258,13 @@ class AppLogger {
     }).toList();
     return items.join(', ');
   }
+
+  /// 读取平台日志内容（仅用于调试/查看），返回字符串
+  static Future<String> readLog({int maxChars = 20000}) async {
+    try {
+      return await platform.readLog(maxChars: maxChars);
+    } catch (e) {
+      return '读取日志失败: $e';
+    }
+  }
 }

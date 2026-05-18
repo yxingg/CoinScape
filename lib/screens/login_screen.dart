@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import '../providers/auth_provider.dart';
+import '../utils/logger.dart';
+import '../utils/permissions.dart';
 
 class LoginScreen extends ConsumerStatefulWidget {
   const LoginScreen({super.key});
@@ -25,6 +28,17 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
     super.dispose();
   }
 
+  @override
+  void initState() {
+    super.initState();
+    // 在首个帧渲染后请求运行时权限，避免启动期间阻塞导致白屏
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!kIsWeb) {
+        requestNecessaryPermissions(context);
+      }
+    });
+  }
+
   Future<void> _submit() async {
     if (!_formKey.currentState!.validate()) return;
     setState(() {
@@ -44,12 +58,51 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
     }
   }
 
+  Future<void> _showLogs() async {
+    try {
+      if (kIsWeb) {
+        final webLog = await AppLogger.readLog();
+        if (!mounted) return;
+        await showDialog<void>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: const Text('日志（Web）'),
+            content: SizedBox(width: double.maxFinite, height: 400, child: SingleChildScrollView(child: SelectableText(webLog))),
+            actions: [TextButton(onPressed: () => Navigator.of(ctx).pop(), child: const Text('关闭'))],
+          ),
+        );
+        return;
+      }
+
+      final log = await AppLogger.readLog();
+      if (!mounted) return;
+      await showDialog<void>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('本地日志'),
+          content: SizedBox(width: double.maxFinite, height: 400, child: SingleChildScrollView(child: SelectableText(log))),
+          actions: [TextButton(onPressed: () => Navigator.of(ctx).pop(), child: const Text('关闭'))],
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      await showDialog<void>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('错误'),
+          content: Text('无法读取日志: $e'),
+          actions: [TextButton(onPressed: () => Navigator.of(ctx).pop(), child: const Text('关闭'))],
+        ),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     return Scaffold(
       body: Container(
-          decoration: BoxDecoration(
+        decoration: BoxDecoration(
           gradient: LinearGradient(
             colors: [theme.colorScheme.primary.withAlpha((0.06 * 255).round()), Colors.white],
             begin: Alignment.topCenter,
@@ -69,10 +122,13 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      CircleAvatar(
-                        radius: 42,
-                        backgroundColor: theme.colorScheme.primary,
-                        child: Icon(Icons.account_balance_wallet, size: 40, color: Colors.white),
+                      GestureDetector(
+                        onLongPress: _showLogs,
+                        child: CircleAvatar(
+                          radius: 42,
+                          backgroundColor: theme.colorScheme.primary,
+                          child: Icon(Icons.account_balance_wallet, size: 40, color: Colors.white),
+                        ),
                       ),
                       const SizedBox(height: 12),
                       Text('CoinScape', style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold)),

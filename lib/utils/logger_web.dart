@@ -60,3 +60,17 @@ class LogConfig {
     await clearWebLogs();
   }
 }
+
+/// 读取 Web 平台日志内容
+Future<String> readLog({int maxChars = 20000}) async {
+  try {
+    final storage = html.window.localStorage;
+    final key = 'coinscape_logs';
+    final content = storage[key] ?? '';
+    if (content.length <= maxChars) return content;
+    return content.substring(content.length - maxChars);
+  } catch (e) {
+    return '读取 Web 日志失败: $e';
+  }
+}
+ 

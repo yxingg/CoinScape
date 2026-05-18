@@ -1,0 +1,73 @@
+name: Build APK and Draft Release
+
+on:
+  push:
+    branches: [ main ]   # 可根据需要修改分支
+  workflow_dispatch:             # 允许手动触发
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 设置 JDK 17（Gradle 要求）
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      # 设置 Flutter SDK（同时会缓存 flutter 及 pub 依赖）
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      # 设置 Android SDK 环境变量（GitHub Runner 已预装 Android SDK）
+      - name: Set Android SDK environment
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME" >> $GITHUB_ENV
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> $GITHUB_ENV
+        # 确保 $ANDROID_HOME 默认指向 /usr/local/lib/android/sdk
+
+      # 接受 Android 许可证（非交互）
+      - name: Accept Android licenses
+        run: |
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses
+        continue-on-error: true   # 若已接受，忽略错误
+
+      # 获取项目依赖
+      - name: Install Flutter dependencies
+        run: flutter pub get
+
+      # 验证环境（可选，方便排查）
+      - name: Doctor
+        run: flutter doctor -v
+
+      # 构建 split APKs
+      - name: Build APKs (arm, arm64, x64)
+        run: |
+          flutter build apk \
+            --target-platform android-arm,android-arm64,android-x64 \
+            --split-per-abi
+
+      # 列出生成的 APK 文件（确认路径）
+      - name: List APK files
+        run: ls -la build/app/outputs/apk/release/
+
+      # 创建草稿 Release 并上传 APK
+      - name: Create Draft Release and Upload APKs
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: draft-build-${{ github.sha }}
+          name: "📦 草稿构建 - ${{ github.sha }}"
+          draft: true
+          prerelease: false
+          files: |
+            build/app/outputs/apk/release/*.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

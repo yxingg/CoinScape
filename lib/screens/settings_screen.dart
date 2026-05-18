@@ -292,7 +292,33 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     }
   }
 
-  Future<void> _checkBackendConnection() async {
+  Future<void> _checkBackendConnection({bool showUserDialog = false}) async {
+    setState(() => _isCheckingBackend = true);
+
+    if (!kIsWeb) {
+      // Android 原生模式：不要主动连接后端。仅在用户手动点击“检测”时给予提示并返回成功状态。
+      if (showUserDialog && mounted) {
+        await showDialog<void>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: const Text('本地独立模式'),
+            content: const Text('Android 端已启用本地独立模式，应用将使用本地存储并不连接后端。'),
+            actions: [TextButton(onPressed: () => Navigator.of(ctx).pop(), child: const Text('确定'))],
+          ),
+        );
+      }
+
+      if (mounted) {
+        setState(() {
+          _isBackendConnected = true;
+          _isCheckingBackend = false;
+        });
+      }
+
+      return;
+    }
+
+    // Web 平台执行真实检测
     setState(() => _isCheckingBackend = true);
     final connected = await ApiService.checkHealth();
     if (mounted) {
@@ -308,12 +334,20 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     if (path.isEmpty) return;
     setState(() => _isSavingPath = true);
     try {
-      final result = await ApiService.updateSavePath(path);
-      await ref.read(settingsProvider.notifier).update((s) => s.copyWith(savePath: path));
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(result['message'] as String? ?? '保存路径已更新，重启服务器后生效')),
-        );
+      if (kIsWeb) {
+        final result = await ApiService.updateSavePath(path);
+        await ref.read(settingsProvider.notifier).update((s) => s.copyWith(savePath: path));
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(result['message'] as String? ?? '保存路径已更新，重启服务器后生效')),
+          );
+        }
+      } else {
+        // Android 本地独立模式：不向后端发送路径，仅在本地配置中保存该值。
+        await ref.read(settingsProvider.notifier).update((s) => s.copyWith(savePath: path));
+        if (mounted) {
+          DialogHelper.showSuccessSnackBar(context, '已保存本地配置（Android 本地独立模式，实际 IO 使用应用私有目录）');
+        }
       }
     } catch (e) {
       if (mounted) {
@@ -442,11 +476,12 @@ AppLogger.warning(logPrefixSettings, 'WebDAV 未配置');
         if (res['success'] == true) {
           // fetch exported JSON from backend and merge into local DB
           final exported = await ApiService.exportAllData();
-          final SyncDataImported = SyncData.fromJson(exported);
+          final syncDataImported = SyncData.fromJson(exported);
           AppLogger.info(logPrefixSettings, '服务器拉取完成, 开始合并数据...');
-          if (mounted) await _mergeData(SyncDataImported);
+          await _mergeData(syncDataImported);
+          if (!mounted) return;
           AppLogger.info(logPrefixSettings, '拉取下载並合并成功');
-          if (mounted) DialogHelper.showSuccessSnackBar(context, '拉取(下载)并合并成功！');
+          DialogHelper.showSuccessSnackBar(context, '拉取(下载)并合并成功！');
         } else {
           if (mounted) DialogHelper.showErrorSnackBar(context, '后端拉取失败');
         }
@@ -1012,7 +1047,7 @@ AppLogger.error(logPrefixSettings, '下载失败 - $errorStr');
 
     final localFonts = await FontManager.getLocalFonts();
 
-    DialogHelper.showCustomDialog<String>(
+    final selectedId = await DialogHelper.showCustomDialog<String>(
       context: context,
       title: '选择字体',
       content: SizedBox(
@@ -1062,21 +1097,24 @@ AppLogger.error(logPrefixSettings, '下载失败 - $errorStr');
           },
         ),
       ),
-    ).then((selectedId) async {
-      if (selectedId != null && selectedId.isNotEmpty) {
-        await ref.read(settingsProvider.notifier).update((s) {
-          switch (fieldKey) {
-            case 'displayFontId': return s.copyWith(displayFontId: selectedId);
-            case 'pdfChineseFontId': return s.copyWith(pdfChineseFontId: selectedId);
-            case 'pdfEnglishFontId': return s.copyWith(pdfEnglishFontId: selectedId);
-            default: return s;
-          }
-        });
-        if (mounted) {
-          DialogHelper.showSuccessSnackBar(context, '已应用字体: ${FontManager.getFontName(selectedId)}');
+    );
+
+    if (selectedId != null && selectedId.isNotEmpty) {
+      await ref.read(settingsProvider.notifier).update((s) {
+        switch (fieldKey) {
+          case 'displayFontId':
+            return s.copyWith(displayFontId: selectedId);
+          case 'pdfChineseFontId':
+            return s.copyWith(pdfChineseFontId: selectedId);
+          case 'pdfEnglishFontId':
+            return s.copyWith(pdfEnglishFontId: selectedId);
+          default:
+            return s;
         }
-      }
-    });
+      });
+      if (!mounted) return;
+      DialogHelper.showSuccessSnackBar(context, '已应用字体: ${FontManager.getFontName(selectedId)}');
+    }
   }
 
   Future<void> _showFontSizePicker(BuildContext context, AppSettings settings) async {
@@ -1136,19 +1174,20 @@ AppLogger.error(logPrefixSettings, '下载失败 - $errorStr');
 
   Future<void> _importLocalFonts() async {
     final fontIds = await FontManager.pickAndSaveCustomFonts();
-      if (fontIds.isNotEmpty && mounted) {
+    if (fontIds.isNotEmpty) {
+      if (!mounted) return;
       DialogHelper.showSuccessSnackBar(context, '已导入 ${fontIds.length} 个字体文件');
       await Future.delayed(const Duration(milliseconds: 500));
-      if (mounted) {
-        _showFontPickerForField(context, 'displayFontId');
-      }
+      if (!mounted) return;
+      _showFontPickerForField(context, 'displayFontId');
     }
   }
 
   Future<void> _manageLocalFonts() async {
     final localFonts = await FontManager.getLocalFonts();
     if (localFonts.isEmpty) {
-      if (mounted) DialogHelper.showWarningSnackBar(context, '暂无本地字体文件');
+      if (!mounted) return;
+      DialogHelper.showWarningSnackBar(context, '暂无本地字体文件');
       return;
     }
     await DialogHelper.showCustomDialog<String>(
@@ -1177,11 +1216,10 @@ AppLogger.error(logPrefixSettings, '下载失败 - $errorStr');
                   );
                   if (confirmed == true) {
                     await FontManager.removeFont(font.id);
-                    if (mounted) {
-                      DialogHelper.showSuccessSnackBar(context, '已删除字体: ${font.name}');
-                      Navigator.pop(context);
-                      _manageLocalFonts();
-                    }
+                    if (!mounted) return;
+                    DialogHelper.showSuccessSnackBar(context, '已删除字体: ${font.name}');
+                    Navigator.pop(context);
+                    _manageLocalFonts();
                   }
                 },
               ),
@@ -1352,7 +1390,7 @@ AppLogger.error(logPrefixSettings, '下载失败 - $errorStr');
                       if (!_isCheckingBackend)
                         IconButton(
                           icon: const Icon(Icons.refresh, size: 16),
-                          onPressed: _checkBackendConnection,
+                          onPressed: () => _checkBackendConnection(showUserDialog: true),
                           tooltip: '刷新连接状态',
                           padding: EdgeInsets.zero,
                           constraints: const BoxConstraints(minWidth: 24, minHeight: 24),
@@ -1649,19 +1687,21 @@ DialogHelper.showSuccessSnackBar(context, value ? '已启用后端代理' : '已
                       Row(
                         mainAxisAlignment: MainAxisAlignment.end,
                         children: [
-                          FilledButton(
+                            FilledButton(
                             onPressed: () async {
                               try {
                                 setState(() => _isSyncing = true);
                                 final res = await ApiService.retryFailedSync();
+                                if (!mounted) return;
                                 if (res['success'] == true) {
                                   DialogHelper.showSuccessSnackBar(context, '已触发重试');
                                 } else {
                                   DialogHelper.showErrorSnackBar(context, '重试请求返回失败');
                                 }
                               } catch (e) {
-                                DialogHelper.showErrorSnackBar(context, '重试失败: $e');
+                                if (mounted) DialogHelper.showErrorSnackBar(context, '重试失败: $e');
                               } finally {
+                                if (!mounted) return;
                                 setState(() => _isSyncing = false);
                                 _startStatusPolling();
                               }
@@ -1669,10 +1709,11 @@ DialogHelper.showSuccessSnackBar(context, value ? '已启用后端代理' : '已
                             child: const Text('重试失败项'),
                           ),
                           const SizedBox(width: 8),
-                          OutlinedButton(
+                            OutlinedButton(
                             onPressed: () async {
                               try {
                                 final res = await ApiService.retryFailedSync(clear: true);
+                                if (!mounted) return;
                                 if (res['success'] == true) {
                                   DialogHelper.showSuccessSnackBar(context, '已清理失败记录');
                                   _startStatusPolling();
@@ -1680,7 +1721,7 @@ DialogHelper.showSuccessSnackBar(context, value ? '已启用后端代理' : '已
                                   DialogHelper.showErrorSnackBar(context, '清理失败记录失败');
                                 }
                               } catch (e) {
-                                DialogHelper.showErrorSnackBar(context, '清理失败: $e');
+                                if (mounted) DialogHelper.showErrorSnackBar(context, '清理失败: $e');
                               }
                             },
                             child: const Text('清理失败记录'),

@@ -196,7 +196,8 @@ class _CoinEditScreenState extends ConsumerState<CoinEditScreen> {
     await repo.setCoinSeriesTags(coinId, _selectedSeriesIds.toList());
     await repo.replaceCoinImages(coinId, _imagePaths);
 
-    if (mounted) Navigator.pop(context);
+    if (!mounted) return;
+    Navigator.pop(context);
   }
 
   @override
@@ -209,7 +210,7 @@ class _CoinEditScreenState extends ConsumerState<CoinEditScreen> {
           if (widget.coin != null)
             IconButton(
               icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
-              onPressed: () => _confirmDeleteCoin(context, ref),
+                  onPressed: () => _confirmDeleteCoin(ref),
               tooltip: '删除纪念币',
             ),
           IconButton(icon: const Icon(Icons.check), onPressed: _save),
@@ -591,37 +592,33 @@ class _CoinEditScreenState extends ConsumerState<CoinEditScreen> {
     );
   }
 
-  Future<void> _confirmDeleteCoin(BuildContext context, WidgetRef ref) async {
+  Future<void> _confirmDeleteCoin(WidgetRef ref) async {
     final coin = widget.coin;
     if (coin == null) return;
     
-    final BuildContext dialogContext = context;
-    
     final confirmed = await DialogHelper.showConfirmDialog(
-      context: dialogContext,
+      context: context,
       title: '删除确认',
       content: '确定要永久删除纪念币 "${coin.name}" 吗？此操作不可撤销。',
       confirmText: '删除',
       isDestructive: true,
     );
-    
-    if (confirmed == true) {
-      try {
-        await ref.read(coinRepositoryProvider).deleteCoin(coin.id);
-        if (mounted) {
-          Navigator.pop(dialogContext);
-        }
-      } catch (e, stack) {
-        AppLogger.error(logPrefixUI, '删除纪念币失败: $e\n$stack');
-        if (mounted) {
-          ScaffoldMessenger.of(dialogContext).showSnackBar(
-            SnackBar(
-              content: Text('删除失败: $e'),
-              backgroundColor: Colors.red,
-            ),
-          );
-        }
-      }
+
+    if (confirmed != true) return;
+
+    try {
+      await ref.read(coinRepositoryProvider).deleteCoin(coin.id);
+      if (!mounted) return;
+      Navigator.of(context).pop();
+    } catch (e, stack) {
+      AppLogger.error(logPrefixUI, '删除纪念币失败: $e\n$stack');
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('删除失败: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
     }
   }
 }

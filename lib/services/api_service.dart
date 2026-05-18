@@ -102,12 +102,20 @@ class ApiService {
   // ==========================================
 
   static Future<bool> checkHealth() async {
-    try {
-      final response = await http.get(Uri.parse('$_baseUrl/api/health'));
-      return response.statusCode == 200;
-    } catch (_) {
-      return false;
+    // 在 Web 环境下进行真实的后端连通性检测
+    if (kIsWeb) {
+      try {
+        final response = await http.get(Uri.parse('$_baseUrl/api/health'));
+        return response.statusCode == 200;
+      } catch (_) {
+        return false;
+      }
     }
+
+    // 原生平台（Android/iOS）使用本地存储/本地 DB，不应在启动时尝试连接后端。
+    // 因此默认返回 false，触发本地离线逻辑。针对设置界面的“检测连接”按钮，
+    // UI 层会拦截并向用户展示“Android 端已启用本地独立模式”的提示。
+    return false;
   }
 
   /// 获取后端配置（保存路径等）

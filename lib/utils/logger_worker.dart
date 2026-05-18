@@ -125,3 +125,20 @@ class LogConfig {
     await clearWebLogs();
   }
 }
+
+/// 读取 Worker/IndexedDB 中的日志并返回字符串形式（尾部限制）
+Future<String> readLog({int maxChars = 20000}) async {
+  try {
+    final entries = await readAllLogs();
+    final buffer = StringBuffer();
+    for (final e in entries) {
+      final line = e['line'] as String? ?? '';
+      buffer.writeln(line);
+    }
+    final result = buffer.toString();
+    if (result.length <= maxChars) return result;
+    return result.substring(result.length - maxChars);
+  } catch (e) {
+    return '读取 Worker 日志失败: $e';
+  }
+}

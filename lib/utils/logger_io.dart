@@ -1,5 +1,7 @@
 import 'dart:io' as io;
+import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:path_provider/path_provider.dart';
 
 String? _logFilePath;
 
@@ -67,15 +69,24 @@ class LogConfig {
   
   /// 获取应用支持目录（平台相关）
   static Future<io.Directory> _getApplicationSupportDirectory() async {
-    if (io.Platform.isWindows) {
-      final appData = io.Platform.environment['APPDATA'] ?? '';
-      final appDataDir = io.Directory('$appData${io.Platform.pathSeparator}CoinScape');
-      if (!await appDataDir.exists()) {
-        await appDataDir.create(recursive: true);
+    try {
+      // 优先使用应用私有目录（Android / iOS / Desktop 支持）
+      final appDoc = await getApplicationDocumentsDirectory();
+      final appDir = io.Directory('${appDoc.path}${io.Platform.pathSeparator}coinscape');
+      if (!await appDir.exists()) {
+        await appDir.create(recursive: true);
       }
-      return appDataDir;
-    } else {
-      // 对于非Windows平台，使用当前目录
+      return appDir;
+    } catch (e) {
+      // 回退到平台特定目录
+      if (io.Platform.isWindows) {
+        final appData = io.Platform.environment['APPDATA'] ?? '';
+        final appDataDir = io.Directory('$appData${io.Platform.pathSeparator}CoinScape');
+        if (!await appDataDir.exists()) {
+          await appDataDir.create(recursive: true);
+        }
+        return appDataDir;
+      }
       return io.Directory.current;
     }
   }
@@ -245,5 +256,25 @@ Future<void> appendLog(String line) async {
   } catch (e) {
     // 如果写入失败，重置日志文件路径，下次自动重新创建
     _logFilePath = null;
+  }
+}
+
+/// 读取日志内容，返回尾部最多 [maxChars] 字符（防止 UI 负载过大）
+Future<String> readLog({int maxChars = 20000}) async {
+  var path = _logFilePath;
+  if (path == null) {
+    path = await initLogWriter();
+    if (path == null) return '';
+  }
+
+  try {
+    final file = io.File(path);
+    if (!await file.exists()) return '';
+    final bytes = await file.readAsBytes();
+    final content = utf8.decode(bytes, allowMalformed: true);
+    if (content.length <= maxChars) return content;
+    return content.substring(content.length - maxChars);
+  } catch (e) {
+    return '读取日志失败: $e';
   }
 }

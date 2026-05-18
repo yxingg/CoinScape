@@ -544,19 +544,19 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
               IconButton(
                 icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
                 tooltip: '删除选中纪念币',
-                onPressed: () => _confirmBatchDeleteCoins(context, ref),
+                onPressed: () => _confirmBatchDeleteCoins(ref),
               ),
               // 添加到系列
               IconButton(
                 icon: const Icon(Icons.bookmark_add),
                 tooltip: '添加到系列',
-                onPressed: () => _showAddToSeriesDialog(context, ref),
+                onPressed: () => _showAddToSeriesDialog(ref),
               ),
               // 从所有系列移除
               IconButton(
                 icon: const Icon(Icons.bookmark_remove),
                 tooltip: '从所有系列移除',
-                onPressed: () => _confirmRemoveFromAllSeries(context, ref),
+                onPressed: () => _confirmRemoveFromAllSeries(ref),
               ),
               IconButton(
                 icon: const Icon(Icons.picture_as_pdf),
@@ -566,7 +566,7 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
               IconButton(
                 icon: const Icon(Icons.ios_share),
                 tooltip: '导出 CCM 数据包',
-                onPressed: () => _exportSelectedCoins(context, ref),
+                onPressed: () => _exportSelectedCoins(ref),
               ),
             ],
           ],
@@ -857,11 +857,11 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
 
 
   /// 显示"添加到系列"对话框
-  Future<void> _showAddToSeriesDialog(BuildContext context, WidgetRef ref) async {
+  Future<void> _showAddToSeriesDialog(WidgetRef ref) async {
     if (_selectedCoinIds.isEmpty) return;
     final repo = ref.read(coinRepositoryProvider);
     final series = await repo.getAllSeries();
-    if (!context.mounted) return;
+    if (!mounted) return;
 
     final selectedSeriesIds = <String>{};
     final result = await DialogHelper.showCustomDialog<bool>(
@@ -905,19 +905,17 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
         _selectedCoinIds.toList(),
         selectedSeriesIds.toList(),
       );
-      if (mounted) {
-        final currentContext = context;
-        DialogHelper.showSuccessSnackBar(currentContext, '已将 ${_selectedCoinIds.length} 枚纪念币添加到 ${selectedSeriesIds.length} 个系列');
-        setState(() {
-          _isSelectionMode = false;
-          _selectedCoinIds.clear();
-        });
-      }
+      if (!mounted) return;
+      DialogHelper.showSuccessSnackBar(context, '已将 ${_selectedCoinIds.length} 枚纪念币添加到 ${selectedSeriesIds.length} 个系列');
+      setState(() {
+        _isSelectionMode = false;
+        _selectedCoinIds.clear();
+      });
     }
   }
 
   /// 确认从所有系列移除
-  Future<void> _confirmRemoveFromAllSeries(BuildContext context, WidgetRef ref) async {
+  Future<void> _confirmRemoveFromAllSeries(WidgetRef ref) async {
     if (_selectedCoinIds.isEmpty) return;
     final confirmed = await DialogHelper.showConfirmDialog(
       context: context,
@@ -929,14 +927,12 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
 
     if (confirmed == true) {
       await ref.read(coinRepositoryProvider).removeCoinsFromAllSeries(_selectedCoinIds.toList());
-      if (mounted) {
-        final currentContext = context;
-        DialogHelper.showSuccessSnackBar(currentContext, '已将 ${_selectedCoinIds.length} 枚纪念币从所有系列中移除');
-        setState(() {
-          _isSelectionMode = false;
-          _selectedCoinIds.clear();
-        });
-      }
+      if (!mounted) return;
+      DialogHelper.showSuccessSnackBar(context, '已将 ${_selectedCoinIds.length} 枚纪念币从所有系列中移除');
+      setState(() {
+        _isSelectionMode = false;
+        _selectedCoinIds.clear();
+      });
     }
   }
 
@@ -1004,9 +1000,9 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
     }
   }
 
-  Future<void> _exportSelectedCoins(BuildContext context, WidgetRef ref) async {
+  Future<void> _exportSelectedCoins(WidgetRef ref) async {
     if (_selectedCoinIds.isEmpty) return;
-    
+
     ScaffoldFeatureController<SnackBar, SnackBarClosedReason>? progressController;
     try {
       progressController = DialogHelper.showProgressSnackBar(context, '正在打包...');
@@ -1050,23 +1046,22 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
       await exportFileAndShare(zipBytes, 'export.ccm');
       
       // 关闭进度条
-      progressController.close();
-      
-      if (mounted) {
-        DialogHelper.showSuccessSnackBar(context, '导出成功，文件已保存');
-        setState(() {
-          _isSelectionMode = false;
-          _selectedCoinIds.clear();
-        });
-      }
+      progressController?.close();
+
+      if (!mounted) return;
+      DialogHelper.showSuccessSnackBar(context, '导出成功，文件已保存');
+      setState(() {
+        _isSelectionMode = false;
+        _selectedCoinIds.clear();
+      });
       
     } catch (e) {
       AppLogger.error(logPrefixUI, '导出失败: $e');
       // 关闭进度条
-      if (progressController != null) {
+      if (progressController != null && mounted) {
         ScaffoldMessenger.of(context).hideCurrentSnackBar();
       }
-      DialogHelper.showErrorSnackBar(context, '导出失败: $e');
+      if (mounted) DialogHelper.showErrorSnackBar(context, '导出失败: $e');
     }
   }
 
@@ -1306,25 +1301,24 @@ Future<void> _pullFromCloud() async {
     );
   }
 
-  void _confirmBatchDeleteCoins(BuildContext context, WidgetRef ref) {
+  void _confirmBatchDeleteCoins(WidgetRef ref) async {
     final count = _selectedCoinIds.length;
-    DialogHelper.showConfirmDialog(
+    final confirmed = await DialogHelper.showConfirmDialog(
       context: context,
       title: '批量删除确认',
       content: '确定要永久删除选中的 $count 枚纪念币吗？此操作不可撤销。',
       confirmText: '删除',
       isDestructive: true,
-    ).then((confirmed) async {
-      if (confirmed == true) {
-        await ref.read(coinRepositoryProvider).deleteCoinsBatch(_selectedCoinIds.toList());
-        if (mounted) {
-          setState(() {
-            _isSelectionMode = false;
-            _selectedCoinIds.clear();
-          });
-          DialogHelper.showSuccessSnackBar(context, '已删除 $count 枚纪念币');
-        }
-      }
-    });
+    );
+
+    if (confirmed == true) {
+      await ref.read(coinRepositoryProvider).deleteCoinsBatch(_selectedCoinIds.toList());
+      if (!mounted) return;
+      setState(() {
+        _isSelectionMode = false;
+        _selectedCoinIds.clear();
+      });
+      DialogHelper.showSuccessSnackBar(context, '已删除 $count 枚纪念币');
+    }
   }
 }

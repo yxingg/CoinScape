@@ -32,3 +32,9 @@ class LogConfig {
     return;
   }
 }
+
+/// 读取日志的存根实现（不可用时返回说明）
+Future<String> readLog({int maxChars = 20000}) async {
+  return '本平台不支持读取日志文件';
+}
+ 

@@ -1,5 +1,6 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import '../services/api_service.dart';
 import 'sync_providers.dart';
 
@@ -38,15 +39,31 @@ class AuthNotifier extends StateNotifier<AuthState> {
 
   Future<bool> login(String username, String password) async {
     try {
-      final ok = await ApiService.login(username, password);
-      if (ok) {
-        SharedPreferences? prefs = ref.read(sharedPreferencesProvider);
-        final sp = prefs ?? await SharedPreferences.getInstance();
+      if (kIsWeb) {
+        final ok = await ApiService.login(username, password);
+        if (ok) {
+          SharedPreferences? prefs = ref.read(sharedPreferencesProvider);
+          final sp = prefs ?? await SharedPreferences.getInstance();
+          await sp.setBool('auth_logged_in', true);
+          await sp.setString('auth_username', username);
+          state = AuthState(loggedIn: true, username: username);
+        }
+        return ok;
+      }
+
+      // 原生平台：本地验证（首次默认 admin / coinscape），并允许用户后续修改保存到 SharedPreferences
+      SharedPreferences? prefs = ref.read(sharedPreferencesProvider);
+      final sp = prefs ?? await SharedPreferences.getInstance();
+      final storedUser = sp.getString('local_auth_username') ?? 'admin';
+      final storedPwd = sp.getString('local_auth_password') ?? 'coinscape';
+
+      if (username == storedUser && password == storedPwd) {
         await sp.setBool('auth_logged_in', true);
         await sp.setString('auth_username', username);
         state = AuthState(loggedIn: true, username: username);
+        return true;
       }
-      return ok;
+      return false;
     } catch (_) {
       return false;
     }
