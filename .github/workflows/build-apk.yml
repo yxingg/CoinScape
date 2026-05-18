@@ -5,6 +5,9 @@ on:
     branches: [ main ]   # 可根据需要修改分支
   workflow_dispatch:             # 允许手动触发
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
