@@ -124,6 +124,11 @@ class LogConfig {
   static Future<void> clearLogs() async {
     await clearWebLogs();
   }
+
+  /// 导出日志到目标路径（Worker 环境不支持直接文件导出）
+  static Future<void> exportLog(String destPath) async {
+    throw Exception('Worker environment does not support exporting logs to filesystem');
+  }
 }
 
 /// 读取 Worker/IndexedDB 中的日志并返回字符串形式（尾部限制）

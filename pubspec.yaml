@@ -47,6 +47,7 @@ dev_dependencies:
   build_runner: ^2.4.8
   drift_dev: ^2.16.0
   flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.14.4
 
 flutter:
   uses-material-design: true
@@ -57,3 +58,21 @@ flutter:
   #   - family: NotoSansSC
   #     fonts:
   #       - asset: assets/fonts/NotoSansSC-Regular.ttf
+
+# 配置 flutter_launcher_icons 来生成各平台的启动图标
+flutter_icons:
+  android: true
+  ios: true
+  image_path: "图标.png"
+  web:
+    generate: true
+    image_path: "图标.png"
+  windows:
+    generate: true
+    image_path: "图标.png"
+  macos:
+    generate: true
+    image_path: "图标.png"
+  linux:
+    generate: true
+    image_path: "assets/icons/图标.png"

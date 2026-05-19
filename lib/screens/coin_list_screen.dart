@@ -1046,7 +1046,7 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
       await exportFileAndShare(zipBytes, 'export.ccm');
       
       // 关闭进度条
-      progressController?.close();
+      progressController.close();
 
       if (!mounted) return;
       DialogHelper.showSuccessSnackBar(context, '导出成功，文件已保存');

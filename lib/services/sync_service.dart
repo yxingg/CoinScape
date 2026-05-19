@@ -4,6 +4,9 @@ import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:webdav_client/webdav_client.dart' as webdav;
 import 'dart:io';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:uuid/uuid.dart';
+import 'package:crypto/crypto.dart';
 
 import '../database/database.dart';
 import '../models/sync_models.dart';
@@ -188,6 +191,32 @@ class SyncService {
       AppLogger.debug(logPrefixSync, '写入完成，开始校验远端文件是否存在');
       final remoteFile = await c.readProps(remotePath);
       AppLogger.info(logPrefixSync, '远端文件校验成功: ${remoteFile.path}');
+      // 尝试写入远端备份标记，便于其他设备判断最新备份
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        var deviceId = prefs.getString('sync.device_id');
+        if (deviceId == null || deviceId.isEmpty) {
+          deviceId = Uuid().v4();
+          await prefs.setString('sync.device_id', deviceId);
+        }
+        final payload = {
+          'timestamp': DateTime.now().toIso8601String(),
+          'device_id': deviceId,
+          'user': prefs.getString('auth.username')
+        };
+        final sorted = Map.fromEntries(payload.entries.toList()..sort((a, b) => a.key.compareTo(b.key)));
+        final checksum = sha256.convert(utf8.encode(jsonEncode(sorted))).toString();
+        payload['checksum'] = checksum;
+        final metaPath = '/.coinscape/last_cloud_backup.txt';
+        try {
+          await c.write(metaPath, utf8.encode(jsonEncode(payload)));
+          AppLogger.info(logPrefixSync, '写入远端备份标记成功: $metaPath');
+        } catch (e) {
+          AppLogger.warning(logPrefixSync, '写入远端备份标记失败: $e');
+        }
+      } catch (e) {
+        AppLogger.warning(logPrefixSync, '准备远端备份标记失败: $e');
+      }
     } catch (e, st) {
       // 检查错误类型以提供更有用的信息
       final errorMessage = e.toString().toLowerCase();

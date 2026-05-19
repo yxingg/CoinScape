@@ -191,6 +191,16 @@ class AppLogger {
     }
   }
 
+  /// 导出日志到目标路径（本地平台），返回成功或抛出异常
+  static Future<void> exportLog(String destPath) async {
+    try {
+      await platform.LogConfig.exportLog(destPath);
+    } catch (e) {
+      error(logPrefixApp, '导出日志失败: $e');
+      rethrow;
+    }
+  }
+
   /// 将 LogLevel 转换为 dart:developer 的日志级别
   static int _getLoglevel(LogLevel level) {
     switch (level) {

@@ -46,3 +46,14 @@ app.*.map.json
 
 # Backend data files
 /backend/data/
+# Ignore optional generated icon files from flutter_launcher_icons
+icons/Icon-*.png
+favicon.png
+
+# Local test scripts and helpers (do not upload to GitHub)
+# These are intended for local testing and may contain plaintext credentials
+/tool/
+/tools/test_*.py
+/backend/test_*.py
+# Local test trigger files
+data/test_*.txt

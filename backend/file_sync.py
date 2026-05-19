@@ -8,7 +8,8 @@ import threading
 import asyncio
 from datetime import datetime
 from typing import Optional, Dict, Any, List
-from urllib.parse import urlparse, urlunparse, quote
+from urllib.parse import urlparse, urlunparse, quote, unquote
+import xml.etree.ElementTree as ET
 
 import httpx
 import random
@@ -132,6 +133,7 @@ class FileSyncManager:
         Returns simple summary.
         """
         start_ts = datetime.utcnow().isoformat()
+        logger.debug('scan_and_queue start: save_path=%s force=%s', self.save_path, force)
         seen = set()
 
         for root, dirs, files in os.walk(self.save_path):
@@ -139,8 +141,10 @@ class FileSyncManager:
                 # skip our own sync DB and the coinscape log
                 rel = os.path.relpath(os.path.join(root, fn), self.save_path).replace('\\', '/')
                 if rel == DB_FILENAME:
+                    logger.debug('Skipping internal DB file: %s', rel)
                     continue
                 if rel.endswith('coinscape.log') or fn == 'coinscape.log':
+                    logger.debug('Skipping log file: %s', rel)
                     continue
 
                 full = os.path.join(root, fn)
@@ -156,6 +160,7 @@ class FileSyncManager:
 
                 # quick check by size+mtime; if not forcing a full push then skip unchanged files
                 if entry and entry.get('size') == size and float(entry.get('mtime') or 0) == mtime and not force:
+                    logger.debug('Skipping unchanged file by size/mtime: %s', rel)
                     self._update_index_seen(rel, start_ts)
                     seen.add(rel)
                     continue
@@ -163,6 +168,7 @@ class FileSyncManager:
                 # compute hash when changed or new (or when forcing)
                 try:
                     sha = self.compute_sha256(full)
+                    logger.debug('Computed sha for %s: %s', rel, sha)
                 except Exception:
                     sha = ''
 
@@ -173,11 +179,13 @@ class FileSyncManager:
                                        remote_path=(entry.get('remote_path') if entry else None),
                                        remote_etag=(entry.get('remote_etag') if entry else None))
                     self._enqueue(rel, 'upload')
+                    logger.info('Enqueued upload (force): %s', rel)
                 else:
                     if not entry or sha != (entry.get('hash') if entry else None):
                         # mark for upload
                         self._upsert_index(rel, sha, size, mtime, start_ts)
                         self._enqueue(rel, 'upload')
+                        logger.info('Enqueued upload: %s', rel)
                     else:
                         # update seen/time
                         self._upsert_index(rel, sha, size, mtime, start_ts,
@@ -199,11 +207,13 @@ class FileSyncManager:
                 # only delete remotely if it was synced before
                 if r['last_synced_at']:
                     self._enqueue(p, 'delete')
+                    logger.info('Enqueued remote delete: %s', p)
                     deleted_count += 1
 
         conn.close()
 
         # summary
+        logger.info('scan_and_queue summary: scanned=%d deletions_enqueued=%d', len(seen), deleted_count)
         return {
             'scanned': len(seen),
             'deletions_enqueued': deleted_count,
@@ -219,6 +229,19 @@ class FileSyncManager:
         quoted_path = '/' + '/'.join(quote(s, safe='') for s in all_segments)
         return urlunparse((parsed.scheme, parsed.netloc, quoted_path, '', '', ''))
 
+    def _create_async_client(self, timeout):
+        """Create an httpx.AsyncClient with redirect option compatible across httpx versions.
+        Tries `follow_redirects`, falls back to `allow_redirects`, otherwise returns client without explicit redirect arg.
+        """
+        kwargs = {'timeout': timeout, 'trust_env': False}
+        try:
+            return httpx.AsyncClient(**{**kwargs, 'follow_redirects': True})
+        except TypeError:
+            try:
+                return httpx.AsyncClient(**{**kwargs, 'allow_redirects': True})
+            except TypeError:
+                return httpx.AsyncClient(**kwargs)
+
     async def _ensure_remote_parent_dirs_async(self, client: httpx.AsyncClient, url: str, auth: Optional[tuple]):
         # attempt to create parent collections via MKCOL for each prefix
         parsed = urlparse(url)
@@ -231,19 +254,53 @@ class FileSyncManager:
         for i in range(1, len(segments)):
             prefixes.append('/' + '/'.join(segments[:i]))
 
-        for p in prefixes:
-            u = urlunparse((parsed.scheme, parsed.netloc, p, '', '', ''))
+        # lazy init verified dirs cache and lock to avoid concurrent MKCOL storms
+        if not hasattr(self, '_verified_dirs'):
+            self._verified_dirs = set()
+        if not hasattr(self, '_verified_dirs_lock') or self._verified_dirs_lock is None:
             try:
-                # MKCOL may return 201 (created) or 405 (already exists) or 409 (conflict)
+                self._verified_dirs_lock = asyncio.Lock()
+            except Exception:
+                self._verified_dirs_lock = None
+
+        for p in prefixes:
+            # fast-path: if directory already verified, skip
+            if p in self._verified_dirs:
+                continue
+
+            u = urlunparse((parsed.scheme, parsed.netloc, p, '', '', ''))
+
+            # Use lock to ensure only one coroutine attempts MKCOL for this prefix at a time
+            if self._verified_dirs_lock is not None:
+                async with self._verified_dirs_lock:
+                    if p in self._verified_dirs:
+                        continue
+                    try:
+                        resp = await self._request_with_retry(client, 'MKCOL', u, auth=auth, timeout=30.0, max_attempts=2)
+                    except Exception as e:
+                        logger.error('MKCOL request exception for %s: %s', u, e, exc_info=True)
+                        continue
+
+                    if resp is None:
+                        continue
+                    # Treat common success codes (including redirects) as success so MKCOL on servers like AList won't break
+                    if resp.status_code in (201, 405, 200, 204, 301, 307, 308):
+                        self._verified_dirs.add(p)
+                        continue
+                    else:
+                        logger.debug('MKCOL returned status %s for %s', resp.status_code, u)
+                        continue
+            else:
                 try:
                     resp = await self._request_with_retry(client, 'MKCOL', u, auth=auth, timeout=30.0, max_attempts=2)
-                except Exception:
+                except Exception as e:
+                    logger.error('MKCOL request exception for %s: %s', u, e, exc_info=True)
                     continue
-                if resp.status_code in (201, 405, 200, 204):
+                if resp is None:
                     continue
-            except Exception:
-                # best-effort: ignore and continue
-                continue
+                if resp.status_code in (201, 405, 200, 204, 301, 307, 308):
+                    self._verified_dirs.add(p)
+                    continue
 
     async def _write_remote_backup_marker(self, webdav_cfg: Dict[str, Any], iso_ts: Optional[str] = None, rel_meta: str = '.coinscape/last_cloud_backup.txt') -> bool:
         """Write a small marker file containing iso timestamp to remote WebDAV under rel_meta.
@@ -296,7 +353,8 @@ class FileSyncManager:
         tmp_path = parsed.path + '.part'
         tmp_url = urlunparse((parsed.scheme, parsed.netloc, tmp_path, '', '', ''))
 
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        client = self._create_async_client(60.0)
+        async with client as client:
             try:
                 await self._ensure_remote_parent_dirs_async(client, tmp_url, auth)
             except Exception:
@@ -347,6 +405,8 @@ class FileSyncManager:
         seen = set()
         files = []
 
+        logger.debug('Listing remote files under %s (start_url=%s)', remote_root, start_url)
+
         propfind_body = '<?xml version="1.0" encoding="utf-8"?>\n<d:propfind xmlns:d="DAV:">\n  <d:prop>\n    <d:getcontentlength/>\n    <d:getlastmodified/>\n    <d:resourcetype/>\n  </d:prop>\n</d:propfind>'
 
         while to_visit:
@@ -392,6 +452,12 @@ class FileSyncManager:
                                 size = int(gl.text)
                             except Exception:
                                 size = None
+                        gm = prop.find('{DAV:}getlastmodified')
+                        if gm is not None and gm.text:
+                            last_modified = gm.text
+                        ge = prop.find('{DAV:}getetag')
+                        if ge is not None and ge.text:
+                            etag = ge.text
                     break
 
                 if is_dir:
@@ -400,7 +466,7 @@ class FileSyncManager:
                     if href_url not in seen:
                         to_visit.append(href_url)
                 else:
-                    files.append({'href': href_url, 'size': size})
+                    files.append({'href': href_url, 'size': size, 'last_modified': last_modified, 'etag': etag})
 
         return files
 
@@ -471,7 +537,8 @@ class FileSyncManager:
         remote_ts = None
         try:
             meta_url = self._build_remote_url(url, remote_root, meta_rel)
-            async with httpx.AsyncClient(timeout=20.0) as client:
+            client = self._create_async_client(20.0)
+            async with client as client:
                 try:
                     resp = await self._request_with_retry(client, 'GET', meta_url, auth=auth, timeout=20.0, max_attempts=2)
                     if resp is not None and resp.status_code in (200, 201):
@@ -496,7 +563,8 @@ class FileSyncManager:
         failed = 0
         imported_db = False
 
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        client = self._create_async_client(60.0)
+        async with client as client:
             files = await self._list_remote_files(client, url, remote_root, auth)
             for f in files:
                 href = f.get('href')
@@ -562,6 +630,152 @@ class FileSyncManager:
 
         return {'downloaded': downloaded, 'failed': failed, 'imported_db': imported_db, 'remote_marker': remote_ts}
 
+    async def preview_pull(self) -> Dict[str, Any]:
+        """Return a preview/diff of remote files vs local index without making changes.
+        Returns: { counts: {...}, entries: [ {path, status, remote:{href,size,last_modified,etag}, local:{hash,size,last_synced_at,remote_etag}} ] }
+        Status values: 'new_remote', 'modified_remote', 'unchanged', 'deleted_remote', 'local_only'
+        """
+        settings = await asyncio.to_thread(db.load_app_settings)
+        webdav = settings.get('sync', {}).get('webdav', {}) if isinstance(settings.get('sync', {}), dict) else {}
+        url = webdav.get('url') if isinstance(webdav, dict) else ''
+        if not url:
+            raise ValueError('WebDAV url not configured')
+
+        user = webdav.get('username') or ''
+        enc_pw = webdav.get('password') or ''
+        try:
+            pw = crypto.decrypt_string(enc_pw) if enc_pw else ''
+        except Exception:
+            pw = enc_pw or ''
+        auth = (user, pw) if user or pw else None
+        remote_root = webdav.get('remote_path') or ''
+
+        client = self._create_async_client(30.0)
+        async with client as client:
+            remote_files = await self._list_remote_files(client, url, remote_root, auth)
+
+        # build remote map
+        remote_map: Dict[str, Dict[str, Any]] = {}
+        for f in remote_files:
+            href = f.get('href')
+            rel = self._relpath_from_remote_href(url, remote_root, href)
+            if not rel:
+                continue
+            # skip metadata and logs
+            if rel.startswith('.coinscape'):
+                continue
+            if rel.endswith('coinscape.log') or rel.split('/')[-1] == 'coinscape.log':
+                continue
+            remote_map[rel] = {
+                'href': href,
+                'size': f.get('size'),
+                'last_modified': f.get('last_modified'),
+                'etag': f.get('etag'),
+            }
+
+        # read local index entries
+        conn = self._get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT path, hash, size, last_seen_at, last_synced_at, remote_path, remote_etag FROM file_index")
+        rows = cur.fetchall()
+        conn.close()
+
+        local_map: Dict[str, Dict[str, Any]] = {r['path']: dict(r) for r in rows}
+
+        all_paths = sorted(set(list(remote_map.keys()) + list(local_map.keys())))
+        entries: List[Dict[str, Any]] = []
+        counts = {'new_remote': 0, 'modified_remote': 0, 'deleted_remote': 0, 'local_only': 0, 'unchanged': 0}
+
+        for path in all_paths:
+            r = remote_map.get(path)
+            l = local_map.get(path)
+            if r and not l:
+                status = 'new_remote'
+                counts['new_remote'] += 1
+            elif r and l:
+                # compare using etag when available, otherwise size
+                if r.get('etag') and l.get('remote_etag') and str(r.get('etag')) != str(l.get('remote_etag')):
+                    status = 'modified_remote'
+                    counts['modified_remote'] += 1
+                elif r.get('size') is not None and l.get('size') is not None and int(r.get('size') or 0) != int(l.get('size') or 0):
+                    status = 'modified_remote'
+                    counts['modified_remote'] += 1
+                else:
+                    status = 'unchanged'
+                    counts['unchanged'] += 1
+            else:
+                # not remote but present locally
+                if l and l.get('last_synced_at'):
+                    status = 'deleted_remote'
+                    counts['deleted_remote'] += 1
+                else:
+                    status = 'local_only'
+                    counts['local_only'] += 1
+
+            entries.append({'path': path, 'status': status, 'remote': r, 'local': l})
+
+        return {'counts': counts, 'entries': entries}
+
+    async def pull_one(self, rel_path: str) -> Dict[str, Any]:
+        """Pull a single remote file identified by rel_path into local save_path.
+        Returns {'success': True, 'imported_db': bool} or {'success': False, 'error': str}
+        """
+        settings = await asyncio.to_thread(db.load_app_settings)
+        webdav = settings.get('sync', {}).get('webdav', {}) if isinstance(settings.get('sync', {}), dict) else {}
+        url = webdav.get('url') if isinstance(webdav, dict) else ''
+        if not url:
+            return {'success': False, 'error': 'WebDAV url not configured'}
+
+        user = webdav.get('username') or ''
+        enc_pw = webdav.get('password') or ''
+        try:
+            pw = crypto.decrypt_string(enc_pw) if enc_pw else ''
+        except Exception:
+            pw = enc_pw or ''
+        auth = (user, pw) if user or pw else None
+        remote_root = webdav.get('remote_path') or ''
+
+        target_url = self._build_remote_url(url, remote_root, rel_path)
+
+        client = self._create_async_client(60.0)
+        async with client as client:
+            try:
+                resp = await self._request_with_retry(client, 'GET', target_url, auth=auth, timeout=120.0, max_attempts=3)
+            except Exception as e:
+                logger.exception('pull_one GET failed for %s: %s', rel_path, e)
+                return {'success': False, 'error': f'get_error:{e}'}
+
+            if resp is None or resp.status_code not in (200, 201):
+                return {'success': False, 'error': f'get_status:{resp.status_code if resp is not None else "none"}'}
+
+            # write to local path
+            target_local = os.path.join(self.save_path, rel_path.replace('/', os.sep))
+            os.makedirs(os.path.dirname(target_local), exist_ok=True)
+            try:
+                with open(target_local + '.tmp', 'wb') as fh:
+                    fh.write(resp.content)
+                os.replace(target_local + '.tmp', target_local)
+            except Exception as e:
+                logger.exception('pull_one write failed for %s: %s', rel_path, e)
+                return {'success': False, 'error': f'write_error:{e}'}
+
+            etag = resp.headers.get('ETag') or resp.headers.get('etag')
+            now = datetime.utcnow().isoformat()
+            await asyncio.to_thread(self._db_update_file_index_after_upload, rel_path, now, target_url, etag)
+
+            imported_db = False
+            if rel_path == 'db/coinscape.db':
+                try:
+                    data = await asyncio.to_thread(self._extract_data_from_sqlite_file, target_local)
+                    if data:
+                        await asyncio.to_thread(db.import_all_data, data)
+                        imported_db = True
+                except Exception as e:
+                    logger.exception('pull_one db import failed: %s', e)
+                    return {'success': False, 'error': f'db_import_error:{e}'}
+
+            return {'success': True, 'imported_db': imported_db}
+
     async def process_queue(self, webdav_cfg: Dict[str, Any], max_attempts: int = 3) -> Dict[str, int]:
         """
         Process pending queue tasks (uploads and deletes) synchronously.
@@ -583,7 +797,8 @@ class FileSyncManager:
         succeeded = 0
         failed = 0
 
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        client = self._create_async_client(60.0)
+        async with client as client:
             while True:
                 row = await asyncio.to_thread(self._db_fetch_pending_task)
                 if not row:
@@ -605,6 +820,7 @@ class FileSyncManager:
                 await asyncio.to_thread(self._db_mark_in_progress, task_id)
 
                 try:
+                    logger.debug('Processing task id=%s path=%s action=%s', task_id, rel_path, action)
                     if action == 'upload':
                         local = os.path.join(self.save_path, rel_path)
                         if not os.path.isfile(local):
@@ -624,13 +840,14 @@ class FileSyncManager:
                         # ensure parent dirs for tmp (and target) exist
                         try:
                             await self._ensure_remote_parent_dirs_async(client, tmp_url, auth)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.error('ensure_remote_parent_dirs failed for %s: %s', tmp_url, e, exc_info=True)
 
                         # read file in thread to avoid blocking
                         try:
                             data = await asyncio.to_thread(lambda: open(local, 'rb').read())
                         except Exception as e:
+                            logger.error('Failed to read local file %s: %s', local, e, exc_info=True)
                             await asyncio.to_thread(self._db_mark_queue_failed, task_id, str(e))
                             failed += 1
                             processed += 1
@@ -639,7 +856,9 @@ class FileSyncManager:
                         # upload to temporary path first (with retries)
                         try:
                             put_tmp = await self._request_with_retry(client, 'PUT', tmp_url, auth=auth, content=data, timeout=60.0, max_attempts=3)
+                            logger.debug('PUT tmp response for %s: %s', rel_path, put_tmp.status_code if put_tmp is not None else 'none')
                         except Exception as e:
+                            logger.exception('put_tmp failed for %s: %s', rel_path, e)
                             await asyncio.to_thread(self._db_mark_queue_failed, task_id, f'put_tmp_error:{e}')
                             failed += 1
                             processed += 1
@@ -668,6 +887,7 @@ class FileSyncManager:
                                     now = datetime.utcnow().isoformat()
                                     await asyncio.to_thread(self._db_update_file_index_after_upload, rel_path, now, target_url, etag)
                                     await asyncio.to_thread(self._db_mark_queue_done, task_id)
+                                    logger.info('Upload succeeded: %s (etag=%s)', rel_path, etag)
                                     succeeded += 1
                                 else:
                                     # MOVE failed -> try fallback: PUT directly to target, then cleanup tmp
@@ -686,6 +906,7 @@ class FileSyncManager:
                                             now = datetime.utcnow().isoformat()
                                             await asyncio.to_thread(self._db_update_file_index_after_upload, rel_path, now, target_url, etag)
                                             await asyncio.to_thread(self._db_mark_queue_done, task_id)
+                                            logger.info('Upload succeeded via fallback PUT: %s (etag=%s)', rel_path, etag)
                                             succeeded += 1
                                         else:
                                             # cleanup tmp and mark failed
@@ -696,6 +917,7 @@ class FileSyncManager:
                                             put_final_status = put_final.status_code if put_final is not None else 'none'
                                             err = f'move_failed:{move_resp.status_code}, put_target:{put_final_status}'
                                             await asyncio.to_thread(self._db_mark_queue_failed, task_id, err)
+                                            logger.warning('Upload failed for %s: %s', rel_path, err)
                                             failed += 1
                                     except Exception as e:
                                         try:
@@ -703,6 +925,7 @@ class FileSyncManager:
                                         except Exception:
                                             pass
                                         await asyncio.to_thread(self._db_mark_queue_failed, task_id, f'fallback_put_error:{e}')
+                                        logger.exception('Fallback put failed for %s: %s', rel_path, e)
                                         failed += 1
                             except Exception as e:
                                 # MOVE request failed entirely; try to cleanup tmp and mark failed
@@ -711,6 +934,7 @@ class FileSyncManager:
                                 except Exception:
                                     pass
                                 await asyncio.to_thread(self._db_mark_queue_failed, task_id, f'move_error:{e}')
+                                logger.exception('MOVE error for %s: %s', rel_path, e)
                                 failed += 1
                         else:
                             # tmp PUT failed -- try direct PUT to target as a fallback (with retry)
@@ -728,14 +952,16 @@ class FileSyncManager:
                                     now = datetime.utcnow().isoformat()
                                     await asyncio.to_thread(self._db_update_file_index_after_upload, rel_path, now, target_url, etag)
                                     await asyncio.to_thread(self._db_mark_queue_done, task_id)
+                                    logger.info('Upload succeeded via direct PUT: %s (etag=%s)', rel_path, etag)
                                     succeeded += 1
                                 else:
                                     put_final_status = put_final.status_code if put_final is not None else 'none'
                                     err = f'put_tmp_failed:{put_tmp.status_code}, put_target:{put_final_status}'
                                     await asyncio.to_thread(self._db_mark_queue_failed, task_id, err)
+                                    logger.warning('Upload failed for %s: %s', rel_path, err)
                                     failed += 1
                             except Exception as e:
-                                logger.exception('put_tmp failed and fallback put raised exception')
+                                logger.exception('put_tmp failed and fallback put raised exception for %s: %s', rel_path, e)
                                 await asyncio.to_thread(self._db_mark_queue_failed, task_id, f'put_tmp_error_and_fallback_failed:{e}')
                                 failed += 1
 
@@ -758,10 +984,12 @@ class FileSyncManager:
                                 await asyncio.to_thread(self._db_mark_queue_failed, task_id, err)
                                 failed += 1
                         except Exception as e:
+                            logger.error('Error processing task id=%s path=%s: %s', task_id, rel_path, e, exc_info=True)
                             await asyncio.to_thread(self._db_mark_queue_failed, task_id, str(e))
                             failed += 1
 
                 except Exception as e:
+                    logger.error('Error processing task id=%s path=%s: %s', task_id, rel_path, e, exc_info=True)
                     await asyncio.to_thread(self._db_mark_queue_failed, task_id, str(e))
                     failed += 1
 
@@ -859,7 +1087,25 @@ class FileSyncManager:
                 # Retry on server errors or 429 (rate limit)
                 if status >= 500 or status == 429:
                     if attempt < max_attempts:
-                        sleep_t = backoff_factor * (2 ** (attempt - 1)) + random.uniform(0, backoff_factor)
+                        # If server provided Retry-After header and it's numeric, honor it
+                        retry_after = None
+                        try:
+                            ra = resp.headers.get('Retry-After')
+                            if ra:
+                                # try parse integer seconds
+                                try:
+                                    retry_after = int(ra)
+                                except Exception:
+                                    # ignore non-integer Retry-After (could be HTTP date); fall back to backoff
+                                    retry_after = None
+                        except Exception:
+                            retry_after = None
+
+                        if retry_after is not None:
+                            sleep_t = float(retry_after) + random.uniform(0, backoff_factor)
+                        else:
+                            sleep_t = backoff_factor * (2 ** (attempt - 1)) + random.uniform(0, backoff_factor)
+
                         await asyncio.sleep(sleep_t)
                         attempt += 1
                         continue

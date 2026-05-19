@@ -59,6 +59,11 @@ class LogConfig {
   static Future<void> clearLogs() async {
     await clearWebLogs();
   }
+
+  /// 导出日志到目标路径（Web 平台不支持文件系统导出，提供返回失败的占位实现）
+  static Future<void> exportLog(String destPath) async {
+    throw Exception('Web platform does not support exporting logs to filesystem');
+  }
 }
 
 /// 读取 Web 平台日志内容

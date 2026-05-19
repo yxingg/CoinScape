@@ -200,3 +200,23 @@ This project is licensed under the **MIT License** — see the [LICENSE](LICENSE
 - [Riverpod](https://riverpod.dev/) — Elegant state management solution
 - All open-source dependency maintainers
 
+---
+
+**Icons & Cleanup (English)**
+
+- The new application icon file is located at the repository root: `图标.png`. To generate and apply launcher icons for platforms locally, follow these steps:
+
+  ```bash
+  flutter pub get
+  flutter pub run flutter_launcher_icons:main
+  ```
+
+  This will use the `图标.png` file at the project root to generate and replace iOS / Android / desktop launcher icons. For Web, copy `图标.png` into the `web/` directory and replace `favicon.png` and files under `web/icons/`.
+
+- Recommended cleanup (optional — confirm before removal):
+  - `.kilo/`: local worktree/tool metadata — safe to remove from repository.
+  - `build/`: Flutter build artifacts — should be ignored and removed from VCS to reduce repo size.
+  - `backend/data/`: runtime data — usually should not be kept in repository; please confirm before deleting.
+
+I can list and delete these candidates one by one; I'll ask for your confirmation before performing any removals.
+

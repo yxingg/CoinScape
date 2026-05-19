@@ -180,7 +180,7 @@ class AppSettings {
     final backend = json['backend'] as Map<String, dynamic>? ?? {};
     final sync = json['sync'] as Map<String, dynamic>? ?? {};
     final webdav = sync['webdav'] as Map<String, dynamic>? ?? {};
-    final mergePolicy = sync['merge_policy'] as String? ?? sync['mergePolicy'] as String? ?? 'prefer_local';
+    // mergePolicy not used in AppSettings directly; ignore if present.
 
     return AppSettings(
       displayFontId: appearance['display_font'] as String? ?? 'default',

@@ -110,6 +110,22 @@ class LogConfig {
       // 忽略清理失败
     }
   }
+
+  /// 导出日志到目标路径（目标为完整文件路径）
+  static Future<void> exportLog(String destPath) async {
+    try {
+      final srcPath = await getConfiguredLogPath();
+      if (srcPath == null) throw Exception('No log file path');
+      final src = io.File(srcPath);
+      if (!await src.exists()) throw Exception('Source log file not found');
+      final dest = io.File(destPath);
+      final parent = dest.parent;
+      if (!await parent.exists()) await parent.create(recursive: true);
+      await src.copy(dest.path);
+    } catch (e) {
+      rethrow;
+    }
+  }
 }
 
 Future<String?> initLogWriter() async {

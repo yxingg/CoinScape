@@ -17,6 +17,9 @@ import '../database/database.dart';
 import '../utils/logger.dart';
 import '../models/sync_models.dart';
 import '../utils/dialog_helper.dart';
+import 'sync_preview_screen.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:path/path.dart' as p;
 
 class SettingsScreen extends ConsumerStatefulWidget {
   const SettingsScreen({super.key});
@@ -514,6 +517,31 @@ AppLogger.error(logPrefixSettings, '下载失败 - $errorStr');
     } finally {
       if (mounted) setState(() => _isSyncing = false);
         await _loadLatestChangeInfo();
+    }
+  }
+
+  Future<void> _exportLogs() async {
+    setState(() => _isSyncing = true);
+    try {
+      if (kIsWeb) {
+        if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Web 平台不支持导出日志到文件系统')));
+        return;
+      }
+      final String? directory = await FilePicker.getDirectoryPath();
+      if (directory == null) return; // user cancelled
+
+      final ts = DateTime.now().toIso8601String().replaceAll(':', '-');
+      final filename = 'coinscape-log-$ts.log';
+      final destPath = p.join(directory, filename);
+
+      await AppLogger.exportLog(destPath);
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('日志已导出到 $destPath')));
+      AppLogger.info(logPrefixSettings, '日志导出成功: $destPath');
+    } catch (e, st) {
+      AppLogger.error(logPrefixSettings, '导出日志失败: $e', st);
+      if (mounted) DialogHelper.showErrorSnackBar(context, '导出日志失败: $e');
+    } finally {
+      if (mounted) setState(() => _isSyncing = false);
     }
   }
 
@@ -1570,6 +1598,22 @@ DialogHelper.showSuccessSnackBar(context, value ? '已启用后端代理' : '已
                     label: const Text('云端备份 (Push)'),
                     style: ElevatedButton.styleFrom(backgroundColor: Theme.of(context).primaryColorLight),
                   ),
+                    const SizedBox(width: 8),
+                    ElevatedButton.icon(
+                      onPressed: _isSyncing ? null : () {
+                        Navigator.push(context, MaterialPageRoute(builder: (_) => const SyncPreviewScreen()));
+                      },
+                      icon: const Icon(Icons.preview),
+                      label: const Text('预览并选择拉取'),
+                      style: ElevatedButton.styleFrom(backgroundColor: Theme.of(context).primaryColorLight),
+                    ),
+                    const SizedBox(width: 8),
+                    ElevatedButton.icon(
+                      onPressed: _isSyncing ? null : _exportLogs,
+                      icon: const Icon(Icons.save_alt),
+                      label: const Text('导出日志'),
+                      style: ElevatedButton.styleFrom(backgroundColor: Theme.of(context).primaryColorLight),
+                    ),
                   // 同步状态框
                   Expanded(
                     child: Container(

@@ -31,6 +31,12 @@ class LogConfig {
   static Future<void> clearLogs() async {
     return;
   }
+  
+  /// 导出日志到指定路径（默认平台无操作）
+  static Future<void> exportLog(String destPath) async {
+    // stub: no-op
+    return;
+  }
 }
 
 /// 读取日志的存根实现（不可用时返回说明）

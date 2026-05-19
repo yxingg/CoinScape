@@ -6,6 +6,10 @@ import 'package:flutter/foundation.dart' show compute;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:uuid/uuid.dart';
+
+import '../utils/logger.dart';
 import 'package:crypto/crypto.dart';
 
 import 'file_sync_db.dart';
@@ -170,7 +174,7 @@ class FileSyncManager {
   }
 
   // ------------------------------ process queue ------------------------------
-  Future<Map<String, int>> processQueue(Map<String, dynamic> webdavCfg, {int maxAttempts = 3}) async {
+  Future<Map<String, int>> processQueue(Map<String, dynamic> webdavCfg, {int maxAttempts = 3, int concurrencyLimit = 6}) async {
     await _ensureInit();
     final url = webdavCfg['url'] as String? ?? '';
     if (url.isEmpty) throw ArgumentError('WebDAV url not provided');
@@ -189,163 +193,186 @@ class FileSyncManager {
 
     try {
       while (true) {
-        final tasks = await _db!.getPendingQueue(limit: 1);
+        // fetch a chunk of pending tasks up to concurrencyLimit
+        final tasks = await _db!.getPendingQueue(limit: concurrencyLimit);
         if (tasks.isEmpty) break;
-        final task = tasks.first;
-        final taskId = task.id;
-        final relPath = task.path;
-        final action = task.action;
 
-        // mark in-progress
-        await _db!.markQueueInProgress(taskId);
-
-        try {
-          if (action == 'upload') {
-            final local = p.join(_baseDir, relPath);
-            final f = File(local);
-            if (!f.existsSync()) {
-              await _db!.updateQueueResult(taskId, 'failed', error: 'local_missing');
-              failed += 1;
-              continue;
-            }
-
-            final targetUri = _buildRemoteUri(url, remoteRoot, relPath);
-            final parsedTmp = targetUri.replace(path: targetUri.path + '.part');
-
-            final headers = <String, String>{};
-            if (basicAuth != null) headers['Authorization'] = basicAuth;
-
-            try {
-              await _ensureRemoteParentDirs(client, parsedTmp, headers);
-            } catch (_) {}
-
-            // read bytes in isolate
-            Uint8List data;
-            try {
-              data = await compute(_readFileBytesSync, local);
-            } catch (e) {
-              await _db!.updateQueueResult(taskId, 'failed', error: e.toString());
-              failed += 1;
-              continue;
-            }
-
-            // PUT to tmp
-            http.Response putTmpResp;
-            try {
-              putTmpResp = await client.put(parsedTmp, headers: headers, body: data).timeout(const Duration(seconds: 60));
-            } catch (e) {
-              await _db!.updateQueueResult(taskId, 'failed', error: 'put_tmp_error:$e');
-              failed += 1;
-              continue;
-            }
-
-            if (putTmpResp.statusCode == 200 || putTmpResp.statusCode == 201 || putTmpResp.statusCode == 204) {
-              // try MOVE
-              try {
-                final moveReq = http.Request('MOVE', parsedTmp);
-                moveReq.headers.addAll(headers);
-                moveReq.headers['Destination'] = targetUri.toString();
-                moveReq.headers['Overwrite'] = 'T';
-                final moveStreamed = await client.send(moveReq).timeout(const Duration(seconds: 30));
-                final moveStatus = moveStreamed.statusCode;
-                if (moveStatus == 200 || moveStatus == 201 || moveStatus == 204) {
-                  // HEAD to fetch ETag
-                  String? etag;
-                  try {
-                    final headResp = await client.head(targetUri, headers: headers).timeout(const Duration(seconds: 10));
-                    if (headResp.statusCode == 200 || headResp.statusCode == 201) {
-                      etag = headResp.headers['etag'] ?? headResp.headers['ETag'];
-                    }
-                  } catch (_) {}
-                  etag ??= putTmpResp.headers['etag'] ?? putTmpResp.headers['ETag'];
-
-                  final existing = await _db!.getIndexByPath(relPath);
-                  await _db!.upsertIndex(
-                    pathStr: relPath,
-                    sha256: existing?.sha256 ?? '',
-                    size: existing?.size ?? 0,
-                    mtime: existing?.mtime ?? 0.0,
-                    lastSeenAt: existing?.lastSeenAt ?? DateTime.now().toIso8601String(),
-                    lastSyncedAt: DateTime.now().toIso8601String(),
-                    remotePath: targetUri.toString(),
-                    remoteEtag: etag,
-                  );
-                  await _db!.updateQueueResult(taskId, 'done');
-                  succeeded += 1;
-                } else {
-                  // MOVE failed -> fallback to PUT final
-                  try {
-                    final putFinal = await client.put(targetUri, headers: headers, body: data).timeout(const Duration(seconds: 60));
-                    if (putFinal.statusCode == 200 || putFinal.statusCode == 201 || putFinal.statusCode == 204) {
-                      try {
-                        await client.delete(parsedTmp, headers: headers).timeout(const Duration(seconds: 10));
-                      } catch (_) {}
-                      final etag = putFinal.headers['etag'] ?? putFinal.headers['ETag'];
-                      final existing = await _db!.getIndexByPath(relPath);
-                      await _db!.upsertIndex(
-                        pathStr: relPath,
-                        sha256: existing?.sha256 ?? '',
-                        size: existing?.size ?? 0,
-                        mtime: existing?.mtime ?? 0.0,
-                        lastSeenAt: existing?.lastSeenAt ?? DateTime.now().toIso8601String(),
-                        lastSyncedAt: DateTime.now().toIso8601String(),
-                        remotePath: targetUri.toString(),
-                        remoteEtag: etag,
-                      );
-                      await _db!.updateQueueResult(taskId, 'done');
-                      succeeded += 1;
-                    } else {
-                      try {
-                        await client.delete(parsedTmp, headers: headers).timeout(const Duration(seconds: 10));
-                      } catch (_) {}
-                      final err = 'move_failed:${moveStatus}, put_target:${putFinal.statusCode}';
-                      await _db!.updateQueueResult(taskId, 'failed', error: err);
-                      failed += 1;
-                    }
-                  } catch (e) {
-                    try {
-                      await client.delete(parsedTmp, headers: headers).timeout(const Duration(seconds: 10));
-                    } catch (_) {}
-                    await _db!.updateQueueResult(taskId, 'failed', error: 'fallback_put_error:$e');
-                    failed += 1;
-                  }
-                }
-              } catch (e) {
-                try {
-                  await client.delete(parsedTmp, headers: headers).timeout(const Duration(seconds: 10));
-                } catch (_) {}
-                await _db!.updateQueueResult(taskId, 'failed', error: 'move_error:$e');
-                failed += 1;
-              }
-            } else {
-              final err = 'put_tmp_failed:${putTmpResp.statusCode}';
-              await _db!.updateQueueResult(taskId, 'failed', error: err);
-              failed += 1;
-            }
-          } else if (action == 'delete') {
-            final targetUri = _buildRemoteUri(url, remoteRoot, relPath);
-            try {
-              final resp = await client.delete(targetUri, headers: basicAuth != null ? {'Authorization': basicAuth} : {}).timeout(const Duration(seconds: 30));
-              if (resp.statusCode == 200 || resp.statusCode == 204 || resp.statusCode == 404) {
-                await _db!.deleteIndex(relPath);
-                await _db!.updateQueueResult(taskId, 'done');
-                succeeded += 1;
-              } else {
-                final err = 'delete_failed:${resp.statusCode}';
-                await _db!.updateQueueResult(taskId, 'failed', error: err);
-                failed += 1;
-              }
-            } catch (e) {
-              await _db!.updateQueueResult(taskId, 'failed', error: e.toString());
-              failed += 1;
-            }
-          }
-        } catch (e) {
-          await _db!.updateQueueResult(taskId, 'failed', error: e.toString());
-          failed += 1;
+        // mark all tasks in this chunk as in-progress to avoid duplication
+        for (final t in tasks) {
+          await _db!.markQueueInProgress(t.id);
         }
 
-        processed += 1;
+        // process chunk concurrently but limited to concurrencyLimit
+        final futures = tasks.map((task) async {
+          final taskId = task.id;
+          final relPath = task.path;
+          final action = task.action;
+
+          try {
+            if (action == 'upload') {
+              final local = p.join(_baseDir, relPath);
+              final f = File(local);
+              if (!f.existsSync()) {
+                await _db!.updateQueueResult(taskId, 'failed', error: 'local_missing');
+                failed += 1;
+                return;
+              }
+
+              final targetUri = _buildRemoteUri(url, remoteRoot, relPath);
+              final parsedTmp = targetUri.replace(path: targetUri.path + '.part');
+
+              final headers = <String, String>{};
+              if (basicAuth != null) headers['Authorization'] = basicAuth;
+
+              try {
+                await _ensureRemoteParentDirs(client, parsedTmp, headers);
+              } catch (_) {}
+
+              // read bytes in isolate
+              Uint8List data;
+              try {
+                data = await compute(_readFileBytesSync, local);
+              } catch (e) {
+                await _db!.updateQueueResult(taskId, 'failed', error: e.toString());
+                failed += 1;
+                return;
+              }
+
+              // PUT to tmp
+              http.Response putTmpResp;
+              try {
+                putTmpResp = await client.put(parsedTmp, headers: headers, body: data).timeout(const Duration(seconds: 60));
+              } catch (e) {
+                await _db!.updateQueueResult(taskId, 'failed', error: 'put_tmp_error:$e');
+                failed += 1;
+                return;
+              }
+
+              if (putTmpResp.statusCode == 200 || putTmpResp.statusCode == 201 || putTmpResp.statusCode == 204) {
+                // try MOVE
+                try {
+                  final moveReq = http.Request('MOVE', parsedTmp);
+                  moveReq.headers.addAll(headers);
+                  moveReq.headers['Destination'] = targetUri.toString();
+                  moveReq.headers['Overwrite'] = 'T';
+                  final moveStreamed = await client.send(moveReq).timeout(const Duration(seconds: 30));
+                  final moveStatus = moveStreamed.statusCode;
+                  if (moveStatus == 200 || moveStatus == 201 || moveStatus == 204) {
+                    // HEAD to fetch ETag
+                    String? etag;
+                    try {
+                      final headResp = await client.head(targetUri, headers: headers).timeout(const Duration(seconds: 10));
+                      if (headResp.statusCode == 200 || headResp.statusCode == 201) {
+                        etag = headResp.headers['etag'] ?? headResp.headers['ETag'];
+                      }
+                    } catch (_) {}
+                    etag ??= putTmpResp.headers['etag'] ?? putTmpResp.headers['ETag'];
+
+                    final existing = await _db!.getIndexByPath(relPath);
+                    await _db!.upsertIndex(
+                      pathStr: relPath,
+                      sha256: existing?.sha256 ?? '',
+                      size: existing?.size ?? 0,
+                      mtime: existing?.mtime ?? 0.0,
+                      lastSeenAt: existing?.lastSeenAt ?? DateTime.now().toIso8601String(),
+                      lastSyncedAt: DateTime.now().toIso8601String(),
+                      remotePath: targetUri.toString(),
+                      remoteEtag: etag,
+                    );
+                    await _db!.updateQueueResult(taskId, 'done');
+                    succeeded += 1;
+                    return;
+                  } else {
+                    // MOVE failed -> fallback to PUT final
+                    try {
+                      final putFinal = await client.put(targetUri, headers: headers, body: data).timeout(const Duration(seconds: 60));
+                      if (putFinal.statusCode == 200 || putFinal.statusCode == 201 || putFinal.statusCode == 204) {
+                        try {
+                          await client.delete(parsedTmp, headers: headers).timeout(const Duration(seconds: 10));
+                        } catch (_) {}
+                        final etag = putFinal.headers['etag'] ?? putFinal.headers['ETag'];
+                        final existing = await _db!.getIndexByPath(relPath);
+                        await _db!.upsertIndex(
+                          pathStr: relPath,
+                          sha256: existing?.sha256 ?? '',
+                          size: existing?.size ?? 0,
+                          mtime: existing?.mtime ?? 0.0,
+                          lastSeenAt: existing?.lastSeenAt ?? DateTime.now().toIso8601String(),
+                          lastSyncedAt: DateTime.now().toIso8601String(),
+                          remotePath: targetUri.toString(),
+                          remoteEtag: etag,
+                        );
+                        await _db!.updateQueueResult(taskId, 'done');
+                        succeeded += 1;
+                        return;
+                      } else {
+                        try {
+                          await client.delete(parsedTmp, headers: headers).timeout(const Duration(seconds: 10));
+                        } catch (_) {}
+                        final err = 'move_failed:${moveStatus}, put_target:${putFinal.statusCode}';
+                        await _db!.updateQueueResult(taskId, 'failed', error: err);
+                        failed += 1;
+                        return;
+                      }
+                    } catch (e) {
+                      try {
+                        await client.delete(parsedTmp, headers: headers).timeout(const Duration(seconds: 10));
+                      } catch (_) {}
+                      await _db!.updateQueueResult(taskId, 'failed', error: 'fallback_put_error:$e');
+                      failed += 1;
+                      return;
+                    }
+                  }
+                } catch (e) {
+                  try {
+                    await client.delete(parsedTmp, headers: headers).timeout(const Duration(seconds: 10));
+                  } catch (_) {}
+                  await _db!.updateQueueResult(taskId, 'failed', error: 'move_error:$e');
+                  failed += 1;
+                  return;
+                }
+              } else {
+                final err = 'put_tmp_failed:${putTmpResp.statusCode}';
+                await _db!.updateQueueResult(taskId, 'failed', error: err);
+                failed += 1;
+                return;
+              }
+            } else if (action == 'delete') {
+              final targetUri = _buildRemoteUri(url, remoteRoot, relPath);
+              try {
+                final resp = await client.delete(targetUri, headers: basicAuth != null ? {'Authorization': basicAuth} : {}).timeout(const Duration(seconds: 30));
+                if (resp.statusCode == 200 || resp.statusCode == 204 || resp.statusCode == 404) {
+                  await _db!.deleteIndex(relPath);
+                  await _db!.updateQueueResult(taskId, 'done');
+                  succeeded += 1;
+                  return;
+                } else {
+                  final err = 'delete_failed:${resp.statusCode}';
+                  await _db!.updateQueueResult(taskId, 'failed', error: err);
+                  failed += 1;
+                  return;
+                }
+              } catch (e) {
+                await _db!.updateQueueResult(taskId, 'failed', error: e.toString());
+                failed += 1;
+                return;
+              }
+            }
+          } catch (e) {
+            await _db!.updateQueueResult(taskId, 'failed', error: e.toString());
+            failed += 1;
+            return;
+          } finally {
+            processed += 1;
+          }
+        }).toList();
+
+        // wait for this chunk to finish
+        try {
+          await Future.wait(futures);
+        } catch (_) {
+          // individual task errors are handled per-task; ignore
+        }
       }
     } finally {
       client.close();
@@ -390,11 +417,94 @@ class FileSyncManager {
     _running = true;
     try {
       await _ensureInit();
+      AppLogger.info(logPrefixSync, 'Starting client-side pushAll');
       final scan = await scanAndQueue();
+      AppLogger.info(logPrefixSync, 'scanAndQueue result: ${scan.toString()}');
       final proc = await processQueue(webdavCfg);
-      return {'started': true, 'scan': scan, 'process': proc};
+      AppLogger.info(logPrefixSync, 'processQueue result: ${proc.toString()}');
+
+      // attempt to write remote backup marker so other devices can see latest backup
+      bool remoteMarkerSet = false;
+      String? lastCloudBackup;
+      try {
+        // prefer local last_local_change if stored in prefs, otherwise use now
+        final prefs = await SharedPreferences.getInstance();
+        final localTs = prefs.getString('sync.last_local_change');
+        final isoToWrite = localTs ?? DateTime.now().toIso8601String();
+        remoteMarkerSet = await _writeRemoteBackupMarker(webdavCfg, isoToWrite);
+        if (remoteMarkerSet) lastCloudBackup = isoToWrite;
+      } catch (e, st) {
+        AppLogger.error(logPrefixSync, 'Failed to set remote backup marker: $e', st);
+      }
+
+      return {
+        'started': true,
+        'scan': scan,
+        'process': proc,
+        'remote_marker_set': remoteMarkerSet,
+        'last_cloud_backup': lastCloudBackup,
+      };
     } finally {
       _running = false;
+    }
+  }
+
+  Future<bool> _writeRemoteBackupMarker(Map<String, dynamic> webdavCfg, String? isoTs) async {
+    try {
+      final url = (webdavCfg['url'] ?? '') as String;
+      if (url.isEmpty) return false;
+      final username = (webdavCfg['username'] ?? '') as String;
+      final password = (webdavCfg['password'] ?? '') as String;
+      final remoteRoot = (webdavCfg['remote_path'] ?? '') as String;
+
+      final prefs = await SharedPreferences.getInstance();
+      var deviceId = prefs.getString('sync.device_id');
+      if (deviceId == null || deviceId.isEmpty) {
+        deviceId = Uuid().v4();
+        await prefs.setString('sync.device_id', deviceId);
+      }
+      String? userInfo = prefs.getString('auth.username');
+
+      final payload = <String, dynamic>{
+        'timestamp': isoTs ?? DateTime.now().toIso8601String(),
+        'device_id': deviceId,
+        'user': userInfo,
+      };
+      // checksum
+      final sorted = Map.fromEntries(payload.entries.toList()..sort((a, b) => a.key.compareTo(b.key)));
+      final jsonBytes = utf8.encode(jsonEncode(sorted));
+      final checksum = sha256.convert(jsonBytes).toString();
+      payload['checksum'] = checksum;
+      final body = utf8.encode(jsonEncode(payload));
+
+      // build target URL
+      Uri base = Uri.parse(url);
+      String basePath = base.path;
+      if (!basePath.endsWith('/')) basePath = '$basePath/';
+      var root = remoteRoot;
+      if (root.startsWith('/')) root = root.substring(1);
+      if (root.isNotEmpty && !root.endsWith('/')) root = '$root/';
+      final meta = '.coinscape/last_cloud_backup.txt';
+      final fullPath = '$basePath$root$meta';
+      final target = base.replace(path: fullPath);
+
+      final headers = <String, String>{'Content-Type': 'application/json'};
+      if (username.isNotEmpty || password.isNotEmpty) {
+        final basic = base64.encode(utf8.encode('$username:$password'));
+        headers['Authorization'] = 'Basic $basic';
+      }
+
+      AppLogger.info(logPrefixSync, 'Writing remote backup marker to $target');
+      final resp = await http.put(target, headers: headers, body: body);
+      if (resp.statusCode == 200 || resp.statusCode == 201 || resp.statusCode == 204) {
+        AppLogger.info(logPrefixSync, 'Remote backup marker written: ${resp.statusCode}');
+        return true;
+      }
+      AppLogger.warning(logPrefixSync, 'Remote marker write failed: ${resp.statusCode}');
+      return false;
+    } catch (e, st) {
+      AppLogger.error(logPrefixSync, 'Exception writing remote marker: $e', st);
+      return false;
     }
   }
 }

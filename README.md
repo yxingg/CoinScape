@@ -189,3 +189,23 @@ lib/
 - [Drift](https://drift.simonbinder.eu/) — 强大的 SQLite ORM
 - [Riverpod](https://riverpod.dev/) — 优雅的状态管理方案
 - 所有开源依赖的维护者们
+
+---
+
+**图标与清理说明 (中文)**
+
+- 新的应用图标文件位于仓库根目录：`图标.png`。建议在本地生成并应用到各平台的启动图标，操作步骤：
+
+  ```bash
+  flutter pub get
+  flutter pub run flutter_launcher_icons:main
+  ```
+
+  该命令会使用根目录的 `图标.png` 文件生成并替换 iOS / Android / 桌面平台的启动图标。对于 Web，请把 `图标.png` 复制到 `web/` 目录并替换 `favicon.png` 与 `web/icons/` 下的图片。
+
+- 建议清理（可选，需你确认）：仓库中可能包含一些不应进入版本控制的生成或本地工具文件：
+  - `.kilo/`：本地工作区/工具元数据，可以安全删除（与源码无关）。
+  - `build/`：Flutter 构建产物，应加入 `.gitignore` 并删除已提交的构建输出以减小仓库体积。
+  - `backend/data/`：包含运行时数据，请确认是否需要保留在仓库中（通常应忽略）。
+
+我可以列出并逐一删除这些候选项；在执行删除前我会再请求你的最终确认。

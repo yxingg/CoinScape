@@ -397,6 +397,17 @@ class ApiService {
   static Future<Map<String, dynamic>> retryFailedSync({bool clear = false}) async {
     return await _post('/sync/files/retry_failed', {'clear': clear});
   }
+
+  /// Preview remote vs local file differences
+  static Future<Map<String, dynamic>> previewPull() async {
+    final res = await _get('/sync/files/preview_pull');
+    return res['preview'] as Map<String, dynamic>;
+  }
+
+  /// Pull a single file on the server by relative path
+  static Future<Map<String, dynamic>> pullFile(String path) async {
+    return await _post('/sync/files/pull_one', {'path': path});
+  }
 }
 
 class ApiException implements Exception {

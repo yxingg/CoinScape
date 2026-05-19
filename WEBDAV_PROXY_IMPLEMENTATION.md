@@ -55,10 +55,10 @@
 ### URL 重写规则
 ```
 原始 WebDAV URL: http://localhost:5244/dav/PC
-后端地址: http://localhost:8000
+后端地址: http://localhost:9876
 
 重写为代理 URL:
-http://localhost:8000/api/proxy/webdav?target=http%3A%2F%2Flocalhost%3A5244%2Fdav%2FPC
+http://localhost:9876/api/proxy/webdav?target=http%3A%2F%2Flocalhost%3A5244%2Fdav%2FPC
 ```
 
 ### 自动环境检测

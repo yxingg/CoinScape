@@ -26,6 +26,9 @@ from urllib.parse import urlparse, quote
 
 import httpx
 import asyncio
+import random
+import socket
+import sys
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Body, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -471,6 +474,12 @@ async def upload_image(file: UploadFile = File(...)):
     with open(filepath, "wb") as f:
         f.write(content)
     
+    # record local change so sync marker logic can use it
+    try:
+        _mark_local_change()
+    except Exception:
+        pass
+
     return {"path": f"images/{filename}"}
 
 
@@ -610,7 +619,12 @@ async def upload_font(file: UploadFile = File(...)):
     content = await file.read()
     with open(filepath, "wb") as f:
         f.write(content)
-    
+    # record local change for sync marker
+    try:
+        _mark_local_change()
+    except Exception:
+        pass
+
     return {"font_id": font_id, "filename": f"{font_id}{ext}", "original_name": original_name}
 
 
@@ -627,6 +641,10 @@ async def delete_font(font_id: str):
     filepath = os.path.join(db.FONTS_DIR, f"{font_id}.ttf")
     if os.path.isfile(filepath):
         os.remove(filepath)
+    try:
+        _mark_local_change()
+    except Exception:
+        pass
     return {"success": True}
 
 
@@ -659,25 +677,33 @@ async def get_settings():
                 meta_rel = '.coinscape/last_cloud_backup.txt'
                 try:
                     target_url = file_sync.manager._build_remote_url(webdav_cfg.get('url'), remote_root, meta_rel)
-                    async with httpx.AsyncClient(timeout=10.0) as client:
-                                resp = await client.get(target_url, auth=auth)
-                                if resp.status_code in (200, 201):
-                                    # try parse JSON metadata; fall back to plain ISO text for backward compatibility
-                                    try:
-                                        j = resp.json()
-                                        if isinstance(j, dict) and 'timestamp' in j:
-                                            last_cloud = j.get('timestamp')
-                                        elif isinstance(j, dict) and 'timestamp' not in j and 'time' in j:
-                                            last_cloud = j.get('time')
-                                        else:
-                                            # fallback to plain text
-                                            text = (resp.text or '').strip()
-                                            if text:
-                                                last_cloud = text
-                                    except Exception:
-                                        text = (resp.text or '').strip()
-                                        if text:
-                                            last_cloud = text
+                    client_kwargs = {'timeout': 10.0, 'trust_env': False}
+                    try:
+                        client = httpx.AsyncClient(**{**client_kwargs, 'follow_redirects': True})
+                    except TypeError:
+                        try:
+                            client = httpx.AsyncClient(**{**client_kwargs, 'allow_redirects': True})
+                        except TypeError:
+                            client = httpx.AsyncClient(**client_kwargs)
+                    async with client as client:
+                        resp = await client.get(target_url, auth=auth)
+                        if resp.status_code in (200, 201):
+                            # try parse JSON metadata; fall back to plain ISO text for backward compatibility
+                            try:
+                                j = resp.json()
+                                if isinstance(j, dict) and 'timestamp' in j:
+                                    last_cloud = j.get('timestamp')
+                                elif isinstance(j, dict) and 'timestamp' not in j and 'time' in j:
+                                    last_cloud = j.get('time')
+                                else:
+                                    # fallback to plain text
+                                    text = (resp.text or '').strip()
+                                    if text:
+                                        last_cloud = text
+                            except Exception:
+                                text = (resp.text or '').strip()
+                                if text:
+                                    last_cloud = text
                 except Exception:
                     logging.getLogger('coinscape.sync').exception('Failed to fetch remote backup marker')
 
@@ -884,6 +910,35 @@ async def api_pull_files(data: dict = Body(None)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/sync/files/preview_pull")
+async def api_preview_pull():
+    """Return a preview/diff of remote files vs local index without applying changes."""
+    try:
+        res = await file_sync.manager.preview_pull()
+        return JSONResponse({"success": True, "preview": res})
+    except Exception as e:
+        logger = logging.getLogger("coinscape.file_sync.api")
+        logger.exception("preview_pull failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/sync/files/pull_one")
+async def api_pull_one(data: dict = Body(...)):
+    """Pull a single file from remote into backend save_path. POST body: {"path":"db/coinscape.db"} """
+    try:
+        if not isinstance(data, dict) or 'path' not in data:
+            raise HTTPException(status_code=400, detail='path required')
+        path = data.get('path')
+        res = await file_sync.manager.pull_one(path)
+        return JSONResponse({"success": True, "result": res})
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger = logging.getLogger("coinscape.file_sync.api")
+        logger.exception("pull_one failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/upload/chunk")
 async def upload_chunk(file: UploadFile = File(...), fileId: str = Form(...), index: int = Form(...)):
     """接收单个分块（multipart/form-data），保存到后端临时分块目录。"""
@@ -946,6 +1001,11 @@ async def complete_upload(fileId: str = Form(...), filename: str = Form(...), ov
             pass
 
         rel_path = os.path.relpath(dest_path, save_path)
+        # mark local change (successful file now present in save_path)
+        try:
+            _mark_local_change()
+        except Exception:
+            pass
         return JSONResponse({"success": True, "path": rel_path})
     except HTTPException:
         raise
@@ -1156,18 +1216,51 @@ async def proxy_webdav_impl(request: Request):
     logger.debug(f"Request body size: {len(body_content) if body_content else 0}")
     
     # 使用httpx异步客户端转发请求
-    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
+    client_kwargs = {'timeout': httpx.Timeout(30.0), 'trust_env': False}
+    try:
+        client = httpx.AsyncClient(**{**client_kwargs, 'follow_redirects': True})
+    except TypeError:
+        try:
+            client = httpx.AsyncClient(**{**client_kwargs, 'allow_redirects': True})
+        except TypeError:
+            client = httpx.AsyncClient(**client_kwargs)
+    async with client as client:
         try:
             # 构造请求
             logger.debug(f"Forwarding request: {request.method} {target_url}, headers: {headers.keys()}, body size: {len(body_content)}")
-            
-            proxy_response = await client.request(
-                method=request.method,
-                url=target_url,
-                headers=headers,
-                content=body_content,  # 可能是空字节b""
-                follow_redirects=True
-            )
+
+            # Implement exponential backoff retries for 429 responses
+            max_attempts = 4
+            proxy_response = None
+            for attempt in range(1, max_attempts + 1):
+                proxy_response = await client.request(
+                    method=request.method,
+                    url=target_url,
+                    headers=headers,
+                    content=body_content,  # 可能是空字节b""
+                    follow_redirects=True
+                )
+                status = proxy_response.status_code
+                if status != 429:
+                    break
+                # status == 429
+                if attempt < max_attempts:
+                    # honor Retry-After if present and numeric
+                    sleep_t = None
+                    try:
+                        ra = proxy_response.headers.get('Retry-After')
+                        if ra:
+                            try:
+                                sleep_t = float(int(ra))
+                            except Exception:
+                                sleep_t = None
+                    except Exception:
+                        sleep_t = None
+                    if sleep_t is None:
+                        sleep_t = 2 * (2 ** (attempt - 1)) + random.uniform(0, 1)
+                    logger.info(f"Received 429 from target, attempt {attempt}/{max_attempts}, sleeping {sleep_t}s before retry")
+                    await asyncio.sleep(sleep_t)
+                    continue
             
             # 准备响应头
             response_headers = dict(proxy_response.headers)
@@ -1322,5 +1415,30 @@ if __name__ == "__main__":
     print(f"Set COINSCAPE_SAVE_PATH env var to change data directory")
     print(f"  Current SAVE_PATH: {db.SAVE_PATH}")
     print()
-    
-    uvicorn.run(app, host=host, port=port)
+    # Check if port is already in use to avoid confusing bind errors.
+    try:
+        check_host = host
+        if check_host == '0.0.0.0' or check_host == '':
+            check_host = '127.0.0.1'
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(0.5)
+            res = sock.connect_ex((check_host, port))
+            if res == 0:
+                msg = f"Port {port} appears to be already in use on {check_host}.\n" \
+                      f"Please stop the other process using this port or set COINSCAPE_PORT to a different port."
+                logger.error(msg)
+                print(msg)
+                sys.exit(1)
+    except Exception as e:
+        # If the check itself fails, log but attempt to continue — uvicorn will surface binding errors if any.
+        logger.debug('Port check failed: %s', e)
+
+    try:
+        uvicorn.run(app, host=host, port=port)
+    except OSError as e:
+        logger.error('Failed to start server on %s:%s - %s', host, port, e, exc_info=True)
+        print(f"Failed to bind to {host}:{port}: {e}")
+        sys.exit(1)
+    except Exception:
+        logger.exception('Unexpected error while running server')
+        raise
