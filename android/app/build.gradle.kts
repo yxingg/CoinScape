@@ -1,7 +1,6 @@
 plugins {
     id("com.android.application")
     id("kotlin-android")
-    // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
 }
 
@@ -19,11 +18,19 @@ android {
         jvmTarget = JavaVersion.VERSION_17.toString()
     }
 
+    // ---------- 新增：固定签名配置 ----------
+    signingConfigs {
+        // 创建一个名为 "fixed" 的签名配置，debug 和 release 都用它
+        fixed {
+            storeFile file('my-release-key.jks')   // keystore 文件放在 android/app/ 下
+            storePassword System.getenv("KEYSTORE_PASSWORD")
+            keyAlias System.getenv("KEY_ALIAS")
+            keyPassword System.getenv("KEY_PASSWORD")
+        }
+    }
+
     defaultConfig {
-        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
         applicationId = "com.example.coinscape"
-        // You can update the following values to match your application needs.
-        // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
@@ -31,10 +38,12 @@ android {
     }
 
     buildTypes {
+        // 显式声明 debug 构建类型，并强制使用我们的固定签名
+        debug {
+            signingConfig signingConfigs.fixed
+        }
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig signingConfigs.fixed   // 原本用的是 debug 签名，现在改成 fixed
         }
     }
 }

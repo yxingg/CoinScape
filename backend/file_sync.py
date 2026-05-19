@@ -437,6 +437,9 @@ class FileSyncManager:
                 # try to inspect prop (only consider propstat with 200)
                 is_dir = False
                 size = None
+                # ensure these are always defined even if absent in response
+                last_modified = None
+                etag = None
                 for propstat in resp_el.findall('{DAV:}propstat'):
                     status_el = propstat.find('{DAV:}status')
                     if status_el is not None and '200' not in (status_el.text or ''):

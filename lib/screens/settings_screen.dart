@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show kIsWeb, defaultTargetPlatform, TargetPlatform;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:drift/drift.dart' as drift;
 import 'package:intl/intl.dart';
 
@@ -9,7 +10,6 @@ import '../providers/settings_provider.dart';
 import '../providers/sync_providers.dart';
 import '../providers/coin_providers.dart';
 import '../providers/auth_provider.dart';
-import '../services/sync_service.dart';
 import '../services/file_sync.dart';
 import '../services/sync_importer.dart';
 import '../services/api_service.dart';
@@ -110,18 +110,38 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         _storedAuthUsername = user;
       });
     } catch (_) {
-      // ignore
+      // Backend unreachable or error: on native platforms, fall back to local stored username
+      try {
+        if (!kIsWeb) {
+          final sp = await SharedPreferences.getInstance();
+          final localUser = sp.getString('local_auth_username') ?? 'admin';
+          setState(() {
+            _acctUserCtrl.text = localUser;
+            _storedAuthUsername = localUser;
+          });
+          return;
+        }
+      } catch (_) {}
+      // ignore for web or if prefs fail
     }
     // 同步最新修改信息（非阻塞）
-    _loadLatestChangeInfo();
+    _refreshLatestChange();
   }
 
   Future<void> _loadLatestChangeInfo() async {
     try {
       final map = await ApiService.getAppSettings();
       final sync = map['sync'] as Map<String, dynamic>?;
-      final src = sync != null && sync['latest_change_source'] is String ? sync['latest_change_source'] as String : null;
-      final t = sync != null && sync['latest_change_time'] is String ? sync['latest_change_time'] as String : null;
+      String? src;
+      String? t;
+      if (sync != null) {
+        if (sync['latest_change_source'] is String) src = sync['latest_change_source'] as String;
+        if (sync['latest_change_time'] is String) {
+          t = sync['latest_change_time'] as String;
+        } else if (sync['last_local_change'] is String) {
+          t = sync['last_local_change'] as String;
+        }
+      }
       if (mounted) {
         setState(() {
           _latestChangeSource = src;
@@ -131,6 +151,49 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       }
     } catch (_) {
       // ignore failures; UI will fall back to default text
+    }
+  }
+
+  Future<void> _refreshLatestChange() async {
+    setState(() => _isCheckingBackend = true);
+    try {
+      // try fetch server-side info when backend available
+      try {
+        final map = await ApiService.getAppSettings();
+        final sync = map['sync'] as Map<String, dynamic>?;
+        String? src;
+        String? t;
+        if (sync != null) {
+          if (sync['latest_change_source'] is String) src = sync['latest_change_source'] as String;
+          if (sync['latest_change_time'] is String) {
+            t = sync['latest_change_time'] as String;
+          } else if (sync['last_local_change'] is String) {
+            t = sync['last_local_change'] as String;
+          }
+        }
+        if (mounted) {
+          setState(() {
+            _latestChangeSource = src;
+            _latestChangeTime = _formatBeijing(t);
+            _hasQueriedLatestChange = true;
+          });
+        }
+      } catch (e) {
+        // backend unreachable: try local prefs for last_local_change
+        try {
+          final prefs = await SharedPreferences.getInstance();
+          final localTs = prefs.getString('sync.last_local_change');
+          if (mounted) {
+            setState(() {
+              _latestChangeSource = 'local';
+              _latestChangeTime = _formatBeijing(localTs);
+              _hasQueriedLatestChange = true;
+            });
+          }
+        } catch (_) {}
+      }
+    } finally {
+      if (mounted) setState(() => _isCheckingBackend = false);
     }
   }
 
@@ -257,7 +320,24 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
     try {
       // verify current credentials
-      final ok = await ApiService.login(_storedAuthUsername, curPwd);
+      bool ok = false;
+      try {
+        if (kIsWeb) {
+          ok = await ApiService.login(_storedAuthUsername.isNotEmpty ? _storedAuthUsername : _acctUserCtrl.text.trim(), curPwd);
+        } else {
+          // Native: verify against locally stored credentials in SharedPreferences
+          final sp = await SharedPreferences.getInstance();
+          final storedUser = sp.getString('local_auth_username') ?? 'admin';
+          final storedPwd = sp.getString('local_auth_password') ?? 'coinscape';
+          // Use stored user for verification (ignore _storedAuthUsername if empty)
+          if (curPwd == storedPwd && ( _acctUserCtrl.text.trim().isEmpty || _acctUserCtrl.text.trim() == storedUser)) {
+            ok = true;
+          }
+        }
+      } catch (e) {
+        ok = false;
+      }
+
       if (!ok) {
         setState(() {
           _acctError = '当前密码错误';
@@ -282,15 +362,29 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         return;
       }
 
-      final res = await ApiService.updateAppSettings(payload);
-      if (res['success'] == true) {
-        // force logout to require re-login with new credentials
-        await ref.read(authProvider.notifier).logout();
-        if (mounted) {
-          DialogHelper.showSuccessSnackBar(context, '账户已更新，请重新登录');
+      if (kIsWeb) {
+        final res = await ApiService.updateAppSettings(payload);
+        if (res['success'] == true) {
+          // force logout to require re-login with new credentials
+          await ref.read(authProvider.notifier).logout();
+          if (mounted) {
+            DialogHelper.showSuccessSnackBar(context, '账户已更新，请重新登录');
+          }
+        } else {
+          setState(() => _acctError = '更新失败');
         }
       } else {
-        setState(() => _acctError = '更新失败');
+        // Native: persist credentials locally in SharedPreferences
+        final sp = await SharedPreferences.getInstance();
+        if (newUser.isNotEmpty && newUser != (sp.getString('local_auth_username') ?? 'admin')) {
+          await sp.setString('local_auth_username', newUser);
+        }
+        if (newPwd.isNotEmpty) {
+          await sp.setString('local_auth_password', newPwd);
+        }
+        // Invalidate auth state to force re-login
+        await ref.read(authProvider.notifier).logout();
+        if (mounted) DialogHelper.showSuccessSnackBar(context, '本地账户已更新，请重新登录');
       }
     } catch (e) {
       setState(() => _acctError = '更新失败: $e');
@@ -404,9 +498,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     }
   }
 
-  SyncService _getService() {
-    return SyncService.fromConfig(ref);
-  }
+
 
   Future<void> _push() async {
     if (!ref.read(webDavConfigProvider).isValid) {
@@ -718,10 +810,15 @@ AppLogger.error(logPrefixSettings, '下载失败 - $errorStr');
         padding: const EdgeInsets.symmetric(vertical: 8.0),
         child: Column(
           children: [
-            const ListTile(
-              title: Text('日志配置', style: TextStyle(fontWeight: FontWeight.bold)),
-              subtitle: Text('配置日志级别和清理日志文件'),
-              leading: Icon(Icons.article),
+            ListTile(
+              title: const Text('日志配置', style: TextStyle(fontWeight: FontWeight.bold)),
+              subtitle: const Text('配置日志级别和清理日志文件'),
+              leading: const Icon(Icons.article),
+              trailing: IconButton(
+                icon: const Icon(Icons.download),
+                tooltip: '导出日志',
+                onPressed: _exportLogs,
+              ),
             ),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16.0),
@@ -1635,87 +1732,90 @@ DialogHelper.showSuccessSnackBar(context, value ? '已启用后端代理' : '已
             if (_isSyncing)
               const Center(child: CircularProgressIndicator())
             else
-              Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                alignment: WrapAlignment.center,
-                crossAxisAlignment: WrapCrossAlignment.center,
-                children: [
-                  ElevatedButton.icon(
-                    onPressed: _push,
-                    icon: const Icon(Icons.cloud_upload),
-                    label: const Text('云端备份 (Push)'),
-                    style: ElevatedButton.styleFrom(backgroundColor: Theme.of(context).primaryColorLight),
-                  ),
-                  ElevatedButton.icon(
-                    onPressed: _isSyncing ? null : () {
-                      Navigator.push(context, MaterialPageRoute(builder: (_) => const SyncPreviewScreen()));
-                    },
-                    icon: const Icon(Icons.preview),
-                    label: const Text('预览并选择拉取'),
-                    style: ElevatedButton.styleFrom(backgroundColor: Theme.of(context).primaryColorLight),
-                  ),
-                  ElevatedButton.icon(
-                    onPressed: _isSyncing ? null : _exportLogs,
-                    icon: const Icon(Icons.save_alt),
-                    label: const Text('导出日志'),
-                    style: ElevatedButton.styleFrom(backgroundColor: Theme.of(context).primaryColorLight),
-                  ),
+              Builder(builder: (ctx) {
+                final isWide = MediaQuery.of(ctx).size.width > 600;
+                final pushBtn = ElevatedButton.icon(
+                  onPressed: _push,
+                  icon: const Icon(Icons.cloud_upload),
+                  label: const Text('云端备份'),
+                );
+                final previewBtn = ElevatedButton.icon(
+                  onPressed: _isSyncing
+                      ? null
+                      : () {
+                          Navigator.push(context, MaterialPageRoute(builder: (_) => const SyncPreviewScreen()));
+                        },
+                  icon: const Icon(Icons.preview),
+                  label: const Text('预览并选择拉取'),
+                );
+                final pullBtn = ElevatedButton.icon(
+                  onPressed: _pull,
+                  icon: const Icon(Icons.cloud_download),
+                  label: const Text('拉取合并'),
+                  style: ElevatedButton.styleFrom(backgroundColor: Colors.green.shade100),
+                );
 
-                  // 同步状态框：在 Wrap 中使用 ConstrainedBox 限制宽度，避免占满整行
-                  ConstrainedBox(
-                    constraints: BoxConstraints(
-                      minWidth: 160,
-                      maxWidth: MediaQuery.of(context).size.width * 0.6,
+                final statusBox = ConstrainedBox(
+                  constraints: BoxConstraints(minWidth: 160, maxWidth: MediaQuery.of(ctx).size.width * 0.45),
+                  child: Container(
+                    margin: const EdgeInsets.symmetric(horizontal: 8),
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                    decoration: BoxDecoration(
+                      color: _buildSyncBoxColor(),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: _buildSyncBoxBorderColor(), width: 1),
                     ),
-                    child: Container(
-                      margin: const EdgeInsets.symmetric(horizontal: 8),
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                      decoration: BoxDecoration(
-                        color: _buildSyncBoxColor(),
-                        borderRadius: BorderRadius.circular(8),
-                        border: Border.all(
-                          color: _buildSyncBoxBorderColor(),
-                          width: 1,
+                    child: Row(
+                      mainAxisSize: MainAxisSize.max,
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        _buildSyncBoxIcon(),
+                        const SizedBox(width: 8),
+                        Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(_buildSyncBoxLabel(), style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: _buildSyncBoxTextColor())),
+                            const SizedBox(height: 2),
+                            Text(_latestChangeTime ?? '未查询', style: TextStyle(fontSize: 12, color: Colors.grey[700])),
+                          ],
                         ),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.max,
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          _buildSyncBoxIcon(),
-                          const SizedBox(width: 8),
-                          Column(
-                            mainAxisSize: MainAxisSize.min,
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(_buildSyncBoxLabel(), style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: _buildSyncBoxTextColor())),
-                              const SizedBox(height: 2),
-                              Text(_latestChangeTime ?? '未查询', style: TextStyle(fontSize: 12, color: Colors.grey[700])),
-                            ],
+                        const SizedBox(width: 6),
+                        if (!_isCheckingBackend)
+                          IconButton(
+                            icon: const Icon(Icons.refresh, size: 16),
+                            onPressed: _refreshLatestChange,
+                            tooltip: '刷新同步状态',
+                            padding: EdgeInsets.zero,
+                            constraints: const BoxConstraints(minWidth: 24, minHeight: 24),
                           ),
-                          const SizedBox(width: 6),
-                          if (!_isCheckingBackend && _hasQueriedLatestChange)
-                            IconButton(
-                              icon: const Icon(Icons.refresh, size: 16),
-                              onPressed: _loadLatestChangeInfo,
-                              tooltip: '刷新同步状态',
-                              padding: EdgeInsets.zero,
-                              constraints: const BoxConstraints(minWidth: 24, minHeight: 24),
-                            ),
-                        ],
-                      ),
+                      ],
                     ),
                   ),
+                );
 
-                  ElevatedButton.icon(
-                    onPressed: _pull,
-                    icon: const Icon(Icons.cloud_download),
-                    label: const Text('拉取合并 (Pull)'),
-                    style: ElevatedButton.styleFrom(backgroundColor: Colors.green.shade100),
-                  ),
-                ],
-              ),
+                if (isWide) {
+                  return Row(
+                    children: [
+                      Expanded(child: pushBtn),
+                      const SizedBox(width: 12),
+                      Expanded(child: previewBtn),
+                      const SizedBox(width: 12),
+                      statusBox,
+                      const SizedBox(width: 12),
+                      Expanded(child: pullBtn),
+                    ],
+                  );
+                }
+
+                return Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  alignment: WrapAlignment.center,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [pushBtn, previewBtn, statusBox, pullBtn],
+                );
+              }),
             const SizedBox(height: 12),
             // 显示同步状态（支持后端简要状态与本地详细状态）
             if (_syncStatus != null) ...[
