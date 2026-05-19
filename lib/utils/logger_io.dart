@@ -151,6 +151,12 @@ Future<String?> initLogWriter() async {
   if (!await logFile.exists()) {
     try {
       await logFile.create(recursive: true);
+      // 写入 UTF-8 BOM，帮助某些编辑器（如 Windows 记事本）识别为 UTF-8
+      try {
+        await logFile.writeAsBytes([0xEF, 0xBB, 0xBF], mode: io.FileMode.write, flush: true);
+      } catch (_) {
+        // 忽略写入 BOM 失败，文件仍然可以使用 UTF-8 写入
+      }
     } catch (e) {
       // 静默失败，返回 null 让调用方处理
       return null;
@@ -260,11 +266,9 @@ Future<void> appendLog(String line) async {
   if (path == null) return;
 
   try {
-    await io.File(path).writeAsString(
-      '$line${io.Platform.lineTerminator}',
-      mode: io.FileMode.append,
-      flush: true,
-    );
+    // 明确以 UTF-8 bytes 追加，避免平台默认编码混淆
+    final bytes = utf8.encode('$line${io.Platform.lineTerminator}');
+    await io.File(path).writeAsBytes(bytes, mode: io.FileMode.append, flush: true);
     
     // 每次写入后检查文件大小
     final logFile = io.File(path);

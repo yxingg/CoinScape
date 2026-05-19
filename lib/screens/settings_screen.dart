@@ -11,6 +11,7 @@ import '../providers/coin_providers.dart';
 import '../providers/auth_provider.dart';
 import '../services/sync_service.dart';
 import '../services/file_sync.dart';
+import '../services/sync_importer.dart';
 import '../services/api_service.dart';
 import '../services/font_manager.dart';
 import '../database/database.dart';
@@ -492,16 +493,38 @@ AppLogger.warning(logPrefixSettings, 'WebDAV 未配置');
           if (mounted) DialogHelper.showErrorSnackBar(context, '后端拉取失败');
         }
       } else {
-        // fallback to client-side archive pull
-        final service = _getService();
-        final data = await service.pullBackup();
-        AppLogger.info(logPrefixSettings, '下载完成, 开始合并数据...');
-        if (mounted) {
-          await _mergeData(data);
-        }
-        AppLogger.info(logPrefixSettings, '拉取下载並合并成功');
-        if (mounted) {
-          DialogHelper.showSuccessSnackBar(context, '拉取(下载)并合并成功！');
+        // fallback to client-side file-level pull (incremental)
+        try {
+          final wcfg = ref.read(webDavConfigProvider);
+          final cfg = {
+            'url': wcfg.url,
+            'username': wcfg.user,
+            'password': wcfg.password,
+            'remote_path': ''
+          };
+          final res = await FileSyncManager.instance.pullAll(cfg);
+          AppLogger.info(logPrefixSettings, '本地文件级拉取结果: $res');
+          final downloaded = res['downloaded'] as int? ?? 0;
+          final failed = res['failed'] as int? ?? 0;
+          final importedDbPath = res['imported_db_path'] as String?;
+          if (importedDbPath != null && importedDbPath.isNotEmpty) {
+            AppLogger.info(logPrefixSettings, '检测到远端 sqlite 已下载到本地: $importedDbPath，开始解析并合并');
+            try {
+              final syncDataImported = await SyncImporter.importFromSqlite(importedDbPath);
+              await _mergeData(syncDataImported);
+              if (mounted) DialogHelper.showSuccessSnackBar(context, '整包数据库已导入并合并成功');
+            } catch (e, st) {
+              AppLogger.error(logPrefixSettings, '导入远端 sqlite 并合并失败: $e', st);
+              if (mounted) DialogHelper.showErrorSnackBar(context, '导入远端 sqlite 失败: $e');
+            }
+          } else if (downloaded > 0) {
+            if (mounted) DialogHelper.showSuccessSnackBar(context, '拉取完成: 已下载 $downloaded 个文件, 失败 $failed 个');
+          } else {
+            if (mounted) DialogHelper.showErrorSnackBar(context, '本地拉取完成（无文件下载）');
+          }
+        } catch (e, st) {
+          AppLogger.error(logPrefixSettings, '本地拉取（文件级）失败: $e', st);
+          if (mounted) DialogHelper.showErrorSnackBar(context, '本地拉取失败: $e');
         }
       }
     } catch (e, st) {

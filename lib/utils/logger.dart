@@ -7,7 +7,7 @@ import 'package:flutter/material.dart';
 import 'logger_stub.dart'
   if (dart.library.io) 'logger_io.dart'
   if (dart.library.html) 'logger_web.dart'
-  if (dart.library.js) 'logger_worker.dart' as platform;
+  if (dart.library.js_interop) 'logger_worker.dart' as platform;
 
 /// 日志前缀常量
 const String logPrefixApp = '[APP]';

@@ -1,4 +1,3 @@
-import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
@@ -50,13 +49,31 @@ class _SyncPreviewScreenState extends ConsumerState<SyncPreviewScreen> {
 
       // Native (Android/iOS) and proxy disabled: use local FileSyncManager for preview
       final fs = FileSyncManager.instance;
-      final detailed = await fs.getDetailedStatus();
+      final cfg = {
+        'url': webdavCfg.url,
+        'username': webdavCfg.user,
+        'password': webdavCfg.password,
+        'remote_path': ''
+      };
+      final detailed = await fs.getDetailedStatus(webdavCfg: cfg);
 
-      // Map local status to a preview-like structure
+      // Map remote + local status to a preview-like structure
       final counts = detailed['counts'] as Map<String, dynamic>? ?? {};
+      final remotePreview = detailed['remote_preview'] as List<dynamic>? ?? [];
       final pending = detailed['pending_preview'] as List<dynamic>? ?? [];
 
       final entries = <Map<String, dynamic>>[];
+      // add remote entries first
+      for (final r in remotePreview) {
+        if (r is Map) {
+          entries.add({
+            'path': r['path'] ?? '',
+            'status': r['status'] ?? 'new_remote',
+            'remote': r['remote'],
+          });
+        }
+      }
+      // then add local pending uploads
       for (final pitem in pending) {
         final path = (pitem is Map && pitem.containsKey('path')) ? (pitem['path'] as String) : (pitem.toString());
         entries.add({
@@ -69,8 +86,8 @@ class _SyncPreviewScreenState extends ConsumerState<SyncPreviewScreen> {
 
       setState(() {
         _counts = {
-          'new_remote': 0,
-          'modified_remote': 0,
+          'new_remote': counts['new_remote'] ?? 0,
+          'modified_remote': counts['modified_remote'] ?? 0,
           'local_only': counts['pending'] ?? 0,
         };
         _entries = entries;

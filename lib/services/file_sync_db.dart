@@ -124,6 +124,11 @@ class FileSyncDb extends _$FileSyncDb {
     };
   }
 
+  /// Clear historic completed/failed queue entries so per-run counts don't accumulate.
+  Future<void> clearHistoricQueue() async {
+    await (delete(syncQueueTable)..where((t) => t.status.isIn(['done', 'failed']))).go();
+  }
+
   Future<List<SyncQueueTableData>> getAllQueue() async {
     return select(syncQueueTable).get();
   }

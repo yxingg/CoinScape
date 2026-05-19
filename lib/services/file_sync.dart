@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
+import 'package:xml/xml.dart' as xml;
 import 'package:flutter/foundation.dart' show compute;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
@@ -402,7 +403,7 @@ class FileSyncManager {
     return _db!.getStatusCounts();
   }
 
-  Future<Map<String, dynamic>> getDetailedStatus({int limit = 100}) async {
+  Future<Map<String, dynamic>> getDetailedStatus({int limit = 100, Map<String, dynamic>? webdavCfg}) async {
     await _ensureInit();
     final counts = await _db!.getStatusCounts();
     final all = await _db!.getAllQueue();
@@ -425,7 +426,144 @@ class FileSyncManager {
           'path': e.path,
           'action': e.action,
         }).toList();
-    return {'counts': counts, 'in_progress': inprog, 'failed': failed, 'pending_preview': pending};
+    // remote enumeration if webdav configuration provided
+    final remotePreview = <Map<String, dynamic>>[];
+    if (webdavCfg != null && webdavCfg['url'] != null && (webdavCfg['url'] as String).isNotEmpty) {
+      final url = webdavCfg['url'] as String;
+      final user = webdavCfg['username'] as String? ?? '';
+      final password = webdavCfg['password'] as String? ?? '';
+      final remoteRoot = webdavCfg['remote_path'] as String? ?? '';
+
+      String? basicAuth;
+      if (user.isNotEmpty || password.isNotEmpty) {
+        basicAuth = 'Basic ' + base64Encode(utf8.encode('$user:$password'));
+      }
+
+      final client = http.Client();
+      try {
+        Uri startUri = _buildRemoteUri(url, remoteRoot, '');
+        var startUrlStr = startUri.toString();
+        if (!startUrlStr.endsWith('/')) startUrlStr = '$startUrlStr/';
+
+        final propfindBody = '<?xml version="1.0" encoding="utf-8"?>\n<d:propfind xmlns:d="DAV:">\n  <d:prop>\n    <d:getcontentlength/>\n    <d:getlastmodified/>\n    <d:resourcetype/>\n    <d:getetag/>\n  </d:prop>\n</d:propfind>';
+
+        final toVisit = <String>[startUrlStr];
+        final seen = <String>{};
+        final remoteFiles = <Map<String, dynamic>>[];
+
+        while (toVisit.isNotEmpty) {
+          final urlStr = toVisit.removeAt(0);
+          if (seen.contains(urlStr)) continue;
+          seen.add(urlStr);
+
+          final uri = Uri.parse(urlStr);
+          final req = http.Request('PROPFIND', uri);
+          req.headers['Depth'] = '1';
+          req.headers['Content-Type'] = 'text/xml';
+          if (basicAuth != null) req.headers['Authorization'] = basicAuth;
+          req.body = propfindBody;
+
+          http.StreamedResponse streamed;
+          try {
+            streamed = await client.send(req).timeout(const Duration(seconds: 12));
+          } catch (e) {
+            continue;
+          }
+          final resp = await http.Response.fromStream(streamed);
+          if (resp.statusCode < 200 || resp.statusCode >= 400) continue;
+
+          xml.XmlDocument doc;
+          try {
+            doc = xml.XmlDocument.parse(resp.body);
+          } catch (e) {
+            continue;
+          }
+
+          final ns = 'DAV:';
+          for (final responseEl in doc.findAllElements('response', namespace: ns)) {
+            final hrefEl = responseEl.getElement('href', namespace: ns);
+            if (hrefEl == null) continue;
+            final href = hrefEl.text;
+            final parsedHref = Uri.parse(href);
+            final hrefUrl = (parsedHref.scheme.isEmpty ? uri.scheme : parsedHref.scheme) + '://' + (parsedHref.hasAuthority ? parsedHref.authority : uri.authority) + parsedHref.path;
+
+            bool isDir = false;
+            int? size;
+            String? lastModified;
+            String? etag;
+
+            for (final propstat in responseEl.findAllElements('propstat', namespace: ns)) {
+              final statusEl = propstat.getElement('status', namespace: ns);
+              if (statusEl != null && !(statusEl.text.contains('200'))) continue;
+              final prop = propstat.getElement('prop', namespace: ns);
+              if (prop != null) {
+                final rt = prop.getElement('resourcetype', namespace: ns);
+                if (rt != null && rt.findElements('collection', namespace: ns).isNotEmpty) isDir = true;
+                final gl = prop.getElement('getcontentlength', namespace: ns);
+                if (gl != null && gl.text.isNotEmpty) {
+                  try { size = int.parse(gl.text); } catch (_) { size = null; }
+                }
+                final gm = prop.getElement('getlastmodified', namespace: ns);
+                if (gm != null) lastModified = gm.text;
+                final ge = prop.getElement('getetag', namespace: ns);
+                if (ge != null) etag = ge.text;
+              }
+              break;
+            }
+
+            if (isDir) {
+              var addUrl = hrefUrl;
+              if (!addUrl.endsWith('/')) addUrl = '$addUrl/';
+              if (!seen.contains(addUrl)) toVisit.add(addUrl);
+            } else {
+              // compute relative path
+              final parsedBase = Uri.parse(startUrlStr);
+              final baseSegments = parsedBase.path.split('/').where((s) => s.isNotEmpty).toList();
+              final hrefSegments = parsedHref.path.split('/').where((s) => s.isNotEmpty).toList();
+              if (hrefSegments.length <= baseSegments.length) continue;
+              final relSegments = hrefSegments.sublist(baseSegments.length);
+              final rel = relSegments.map((s) => Uri.decodeComponent(s)).join('/');
+
+              if (rel.startsWith('.coinscape')) continue;
+              if (rel.endsWith('coinscape.log') || rel.split('/').last == 'coinscape.log') continue;
+
+              remoteFiles.add({'path': rel, 'href': hrefUrl, 'size': size, 'last_modified': lastModified, 'etag': etag});
+            }
+          }
+        }
+
+        // compare with local index
+        final newRemote = <Map<String, dynamic>>[];
+        final modifiedRemote = <Map<String, dynamic>>[];
+        for (final rf in remoteFiles) {
+          final rel = rf['path'] as String;
+          final local = await _db!.getIndexByPath(rel);
+          final rsize = rf['size'] as int?;
+          final retag = rf['etag'] as String?;
+          if (local == null) {
+            newRemote.add({'path': rel, 'status': 'new_remote', 'remote': {'size': rsize, 'last_modified': rf['last_modified'], 'etag': retag}});
+          } else {
+            final lsize = local.size;
+            final letag = local.remoteEtag;
+            if ((lsize == null && rsize != null) || (lsize != null && rsize != null && lsize != rsize) || (retag != null && letag != null && retag != letag)) {
+              modifiedRemote.add({'path': rel, 'status': 'modified_remote', 'remote': {'size': rsize, 'last_modified': rf['last_modified'], 'etag': retag}});
+            }
+          }
+        }
+
+        remotePreview.addAll(newRemote.take(limit));
+        remotePreview.addAll(modifiedRemote.take(limit));
+        counts['new_remote'] = newRemote.length;
+        counts['modified_remote'] = modifiedRemote.length;
+      } finally {
+        client.close();
+      }
+    } else {
+      counts['new_remote'] = 0;
+      counts['modified_remote'] = 0;
+    }
+
+    return {'counts': counts, 'in_progress': inprog, 'failed': failed, 'pending_preview': pending, 'remote_preview': remotePreview};
   }
 
   Future<Map<String, dynamic>> pushAll(Map<String, dynamic> webdavCfg) async {
@@ -433,6 +571,10 @@ class FileSyncManager {
     _running = true;
     try {
       await _ensureInit();
+      // reset historic queue entries so counts are per-run (do not accumulate)
+      try {
+        await _db!.clearHistoricQueue();
+      } catch (_) {}
       AppLogger.info(logPrefixSync, 'Starting client-side pushAll');
       final scan = await scanAndQueue();
       AppLogger.info(logPrefixSync, 'scanAndQueue result: ${scan.toString()}');
@@ -462,6 +604,165 @@ class FileSyncManager {
       };
     } finally {
       _running = false;
+    }
+  }
+
+  Future<Map<String, dynamic>> pullAll(Map<String, dynamic> webdavCfg) async {
+    await _ensureInit();
+
+    // reset historic queue entries to avoid cumulative counts from previous runs
+    try {
+      await _db!.clearHistoricQueue();
+    } catch (_) {}
+
+    final url = webdavCfg['url'] as String? ?? '';
+    if (url.isEmpty) throw ArgumentError('WebDAV url not provided');
+
+    final user = webdavCfg['username'] as String? ?? '';
+    final password = webdavCfg['password'] as String? ?? '';
+    final remoteRoot = webdavCfg['remote_path'] as String? ?? '';
+
+    String? basicAuth;
+    if (user.isNotEmpty || password.isNotEmpty) {
+      basicAuth = 'Basic ' + base64Encode(utf8.encode('$user:$password'));
+    }
+
+    final client = http.Client();
+    var downloaded = 0, failed = 0;
+    String? importedDbPath;
+
+    try {
+      // build start url
+      Uri startUri = _buildRemoteUri(url, remoteRoot, '');
+      var startUrlStr = startUri.toString();
+      if (!startUrlStr.endsWith('/')) startUrlStr = '$startUrlStr/';
+
+      // perform breadth-first PROPFIND (Depth:1) recursion to enumerate files
+      final propfindBody = '<?xml version="1.0" encoding="utf-8"?>\n<d:propfind xmlns:d="DAV:">\n  <d:prop>\n    <d:getcontentlength/>\n    <d:getlastmodified/>\n    <d:resourcetype/>\n    <d:getetag/>\n  </d:prop>\n</d:propfind>';
+
+      final toVisit = <String>[startUrlStr];
+      final seen = <String>{};
+      final files = <Map<String, dynamic>>[];
+
+      while (toVisit.isNotEmpty) {
+        final urlStr = toVisit.removeAt(0);
+        if (seen.contains(urlStr)) continue;
+        seen.add(urlStr);
+
+        final uri = Uri.parse(urlStr);
+        final req = http.Request('PROPFIND', uri);
+        req.headers['Depth'] = '1';
+        req.headers['Content-Type'] = 'text/xml';
+        if (basicAuth != null) req.headers['Authorization'] = basicAuth;
+        req.body = propfindBody;
+
+        http.StreamedResponse streamed;
+        try {
+          streamed = await client.send(req).timeout(const Duration(seconds: 20));
+        } catch (e) {
+          continue;
+        }
+        final resp = await http.Response.fromStream(streamed);
+        if (resp.statusCode < 200 || resp.statusCode >= 400) continue;
+
+        xml.XmlDocument doc;
+        try {
+          doc = xml.XmlDocument.parse(resp.body);
+        } catch (e) {
+          continue;
+        }
+
+        final ns = 'DAV:';
+        for (final responseEl in doc.findAllElements('response', namespace: ns)) {
+          final hrefEl = responseEl.getElement('href', namespace: ns);
+          if (hrefEl == null) continue;
+          final href = hrefEl.text;
+          final parsedHref = Uri.parse(href);
+          final hrefUrl = (parsedHref.scheme.isEmpty ? uri.scheme : parsedHref.scheme) + '://' + (parsedHref.hasAuthority ? parsedHref.authority : uri.authority) + parsedHref.path;
+
+          bool isDir = false;
+          int? size;
+          String? lastModified;
+          String? etag;
+
+          for (final propstat in responseEl.findAllElements('propstat', namespace: ns)) {
+            final statusEl = propstat.getElement('status', namespace: ns);
+            if (statusEl != null && !(statusEl.text.contains('200'))) continue;
+            final prop = propstat.getElement('prop', namespace: ns);
+            if (prop != null) {
+              final rt = prop.getElement('resourcetype', namespace: ns);
+              if (rt != null && rt.findElements('collection', namespace: ns).isNotEmpty) isDir = true;
+              final gl = prop.getElement('getcontentlength', namespace: ns);
+              if (gl != null && gl.text.isNotEmpty) {
+                try { size = int.parse(gl.text); } catch (_) { size = null; }
+              }
+              final gm = prop.getElement('getlastmodified', namespace: ns);
+              if (gm != null) lastModified = gm.text;
+              final ge = prop.getElement('getetag', namespace: ns);
+              if (ge != null) etag = ge.text;
+            }
+            break;
+          }
+
+          if (isDir) {
+            var addUrl = hrefUrl;
+            if (!addUrl.endsWith('/')) addUrl = '$addUrl/';
+            if (!seen.contains(addUrl)) toVisit.add(addUrl);
+          } else {
+            files.add({'href': hrefUrl, 'size': size, 'last_modified': lastModified, 'etag': etag});
+          }
+        }
+      }
+
+      // Now download files
+      for (final f in files) {
+        final href = f['href'] as String?;
+        if (href == null) continue;
+        // compute relative path
+        final parsedBase = Uri.parse(startUrlStr);
+        final parsedHref = Uri.parse(href);
+        final baseSegments = parsedBase.path.split('/').where((s) => s.isNotEmpty).toList();
+        final hrefSegments = parsedHref.path.split('/').where((s) => s.isNotEmpty).toList();
+        if (hrefSegments.length <= baseSegments.length) continue;
+        final relSegments = hrefSegments.sublist(baseSegments.length);
+        final rel = relSegments.map((s) => Uri.decodeComponent(s)).join('/');
+
+        // skip metadata
+        if (rel.startsWith('.coinscape')) continue;
+        if (rel.endsWith('coinscape.log') || rel.split('/').last == 'coinscape.log') continue;
+
+        final targetLocal = p.join(_baseDir, rel.replaceAll('/', p.separator));
+        final parentDir = Directory(p.dirname(targetLocal));
+        if (!await parentDir.exists()) await parentDir.create(recursive: true);
+
+        try {
+          final getReq = http.Request('GET', Uri.parse(href));
+          if (basicAuth != null) getReq.headers['Authorization'] = basicAuth;
+          final streamedGet = await client.send(getReq).timeout(const Duration(seconds: 120));
+          final getResp = await http.Response.fromStream(streamedGet);
+          if (getResp.statusCode == 200 || getResp.statusCode == 201) {
+            final tmpFile = File('$targetLocal.tmp');
+            await tmpFile.writeAsBytes(getResp.bodyBytes);
+            await tmpFile.rename(targetLocal);
+            // detect if downloaded sqlite DB (coinscape.db under db/)
+            if (p.basename(targetLocal) == 'coinscape.db') {
+              importedDbPath = targetLocal;
+            }
+            downloaded += 1;
+            // update index
+            final existing = await _db!.getIndexByPath(rel);
+            await _db!.upsertIndex(pathStr: rel, sha256: existing?.sha256 ?? '', size: existing?.size ?? 0, mtime: existing?.mtime ?? 0.0, lastSeenAt: existing?.lastSeenAt ?? DateTime.now().toIso8601String(), lastSyncedAt: DateTime.now().toIso8601String(), remotePath: href, remoteEtag: getResp.headers['etag'] ?? getResp.headers['ETag']);
+          } else {
+            failed += 1;
+          }
+        } catch (e) {
+          failed += 1;
+        }
+      }
+
+      return {'downloaded': downloaded, 'failed': failed, 'imported_db_path': importedDbPath};
+    } finally {
+      client.close();
     }
   }
 
