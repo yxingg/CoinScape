@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart' show kIsWeb, defaultTargetPlatform, TargetPlatform;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:drift/drift.dart' as drift;
 import 'package:intl/intl.dart';
@@ -20,6 +20,9 @@ import '../utils/dialog_helper.dart';
 import 'sync_preview_screen.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
+
 
 class SettingsScreen extends ConsumerStatefulWidget {
   const SettingsScreen({super.key});
@@ -527,13 +530,33 @@ AppLogger.error(logPrefixSettings, '下载失败 - $errorStr');
         if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Web 平台不支持导出日志到文件系统')));
         return;
       }
-      final String? directory = await FilePicker.getDirectoryPath();
-      if (directory == null) return; // user cancelled
 
       final ts = DateTime.now().toIso8601String().replaceAll(':', '-');
       final filename = 'coinscape-log-$ts.log';
-      final destPath = p.join(directory, filename);
 
+      // Mobile: write to temporary file then open system share/save dialog (uses SAF on Android)
+      if (defaultTargetPlatform == TargetPlatform.android || defaultTargetPlatform == TargetPlatform.iOS) {
+        final tmp = await getTemporaryDirectory();
+        final destPath = p.join(tmp.path, filename);
+        await AppLogger.exportLog(destPath);
+
+        try {
+          // Use share_plus to open system share/save dialog which is SAF-friendly on Android
+          final xfile = XFile(destPath);
+          await Share.shareXFiles([xfile], text: 'CoinScape 日志: $filename');
+          if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('已创建临时日志并打开系统分享/保存对话')));
+          AppLogger.info(logPrefixSettings, '日志已导出到临时文件并打开分享对话: $destPath');
+        } catch (e) {
+          AppLogger.error(logPrefixSettings, '通过分享导出日志失败: $e');
+          if (mounted) DialogHelper.showErrorSnackBar(context, '通过分享导出日志失败: $e');
+        }
+        return;
+      }
+
+      // Desktop: allow user to pick a directory and write file there
+      final String? directory = await FilePicker.getDirectoryPath();
+      if (directory == null) return; // user cancelled
+      final destPath = p.join(directory, filename);
       await AppLogger.exportLog(destPath);
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('日志已导出到 $destPath')));
       AppLogger.info(logPrefixSettings, '日志导出成功: $destPath');
@@ -1589,8 +1612,11 @@ DialogHelper.showSuccessSnackBar(context, value ? '已启用后端代理' : '已
             if (_isSyncing)
               const Center(child: CircularProgressIndicator())
             else
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                alignment: WrapAlignment.center,
+                crossAxisAlignment: WrapCrossAlignment.center,
                 children: [
                   ElevatedButton.icon(
                     onPressed: _push,
@@ -1598,24 +1624,27 @@ DialogHelper.showSuccessSnackBar(context, value ? '已启用后端代理' : '已
                     label: const Text('云端备份 (Push)'),
                     style: ElevatedButton.styleFrom(backgroundColor: Theme.of(context).primaryColorLight),
                   ),
-                    const SizedBox(width: 8),
-                    ElevatedButton.icon(
-                      onPressed: _isSyncing ? null : () {
-                        Navigator.push(context, MaterialPageRoute(builder: (_) => const SyncPreviewScreen()));
-                      },
-                      icon: const Icon(Icons.preview),
-                      label: const Text('预览并选择拉取'),
-                      style: ElevatedButton.styleFrom(backgroundColor: Theme.of(context).primaryColorLight),
+                  ElevatedButton.icon(
+                    onPressed: _isSyncing ? null : () {
+                      Navigator.push(context, MaterialPageRoute(builder: (_) => const SyncPreviewScreen()));
+                    },
+                    icon: const Icon(Icons.preview),
+                    label: const Text('预览并选择拉取'),
+                    style: ElevatedButton.styleFrom(backgroundColor: Theme.of(context).primaryColorLight),
+                  ),
+                  ElevatedButton.icon(
+                    onPressed: _isSyncing ? null : _exportLogs,
+                    icon: const Icon(Icons.save_alt),
+                    label: const Text('导出日志'),
+                    style: ElevatedButton.styleFrom(backgroundColor: Theme.of(context).primaryColorLight),
+                  ),
+
+                  // 同步状态框：在 Wrap 中使用 ConstrainedBox 限制宽度，避免占满整行
+                  ConstrainedBox(
+                    constraints: BoxConstraints(
+                      minWidth: 160,
+                      maxWidth: MediaQuery.of(context).size.width * 0.6,
                     ),
-                    const SizedBox(width: 8),
-                    ElevatedButton.icon(
-                      onPressed: _isSyncing ? null : _exportLogs,
-                      icon: const Icon(Icons.save_alt),
-                      label: const Text('导出日志'),
-                      style: ElevatedButton.styleFrom(backgroundColor: Theme.of(context).primaryColorLight),
-                    ),
-                  // 同步状态框
-                  Expanded(
                     child: Container(
                       margin: const EdgeInsets.symmetric(horizontal: 8),
                       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
@@ -1655,6 +1684,7 @@ DialogHelper.showSuccessSnackBar(context, value ? '已启用后端代理' : '已
                       ),
                     ),
                   ),
+
                   ElevatedButton.icon(
                     onPressed: _pull,
                     icon: const Icon(Icons.cloud_download),

@@ -144,14 +144,30 @@ class FileSyncManager {
   // ------------------------------ remote URL builder ------------------------------
   Uri _buildRemoteUri(String baseUrl, String remoteRoot, String relPath) {
     final parsed = Uri.parse(baseUrl);
-    final baseSegments = parsed.pathSegments.where((s) => s.isNotEmpty).toList();
-    final rootSegments = remoteRoot.split('/').where((s) => s.isNotEmpty).toList();
-    final relSegments = relPath.split('/').where((s) => s.isNotEmpty).toList();
-    final all = <String>[];
-    all.addAll(baseSegments);
-    all.addAll(rootSegments);
-    all.addAll(relSegments);
-    return Uri(scheme: parsed.scheme, host: parsed.host, port: parsed.hasPort ? parsed.port : null, pathSegments: all);
+    // Ensure base path ends with a slash so resolve treats it as a directory
+    var base = parsed;
+    if (!base.path.endsWith('/')) {
+      base = base.replace(path: base.path + '/');
+    }
+
+    // Use posix join to avoid backslashes on Windows and normalize segments
+    final reference = p.posix.join(remoteRoot, relPath);
+    if (reference.isEmpty) return base;
+
+    try {
+      final resolved = base.resolve(reference);
+      return resolved;
+    } catch (_) {
+      // Fallback to manual construction similar to previous implementation
+      final baseSegments = parsed.pathSegments.where((s) => s.isNotEmpty).toList();
+      final rootSegments = remoteRoot.split('/').where((s) => s.isNotEmpty).toList();
+      final relSegments = relPath.split('/').where((s) => s.isNotEmpty).toList();
+      final all = <String>[];
+      all.addAll(baseSegments);
+      all.addAll(rootSegments);
+      all.addAll(relSegments);
+      return Uri(scheme: parsed.scheme, host: parsed.host, port: parsed.hasPort ? parsed.port : null, pathSegments: all);
+    }
   }
 
   Future<void> _ensureRemoteParentDirs(http.Client client, Uri url, Map<String, String> headers) async {
@@ -477,16 +493,9 @@ class FileSyncManager {
       payload['checksum'] = checksum;
       final body = utf8.encode(jsonEncode(payload));
 
-      // build target URL
-      Uri base = Uri.parse(url);
-      String basePath = base.path;
-      if (!basePath.endsWith('/')) basePath = '$basePath/';
-      var root = remoteRoot;
-      if (root.startsWith('/')) root = root.substring(1);
-      if (root.isNotEmpty && !root.endsWith('/')) root = '$root/';
+      // build target URL using robust join/resolution to avoid double-slash or missing segment bugs
       final meta = '.coinscape/last_cloud_backup.txt';
-      final fullPath = '$basePath$root$meta';
-      final target = base.replace(path: fullPath);
+      final target = _buildRemoteUri(url, remoteRoot, meta);
 
       final headers = <String, String>{'Content-Type': 'application/json'};
       if (username.isNotEmpty || password.isNotEmpty) {
@@ -495,13 +504,25 @@ class FileSyncManager {
       }
 
       AppLogger.info(logPrefixSync, 'Writing remote backup marker to $target');
-      final resp = await http.put(target, headers: headers, body: body);
-      if (resp.statusCode == 200 || resp.statusCode == 201 || resp.statusCode == 204) {
-        AppLogger.info(logPrefixSync, 'Remote backup marker written: ${resp.statusCode}');
-        return true;
+      final client = http.Client();
+      try {
+        try {
+          await _ensureRemoteParentDirs(client, target, headers);
+        } catch (e) {
+          AppLogger.debug(logPrefixSync, 'ensureRemoteParentDirs failed (continuing): $e');
+        }
+
+        final resp = await client.put(target, headers: headers, body: body).timeout(const Duration(seconds: 30));
+        if (resp.statusCode == 200 || resp.statusCode == 201 || resp.statusCode == 204) {
+          AppLogger.info(logPrefixSync, 'Remote backup marker written: ${resp.statusCode}');
+          return true;
+        }
+
+        AppLogger.warning(logPrefixSync, 'Remote marker write failed: ${resp.statusCode}');
+        return false;
+      } finally {
+        client.close();
       }
-      AppLogger.warning(logPrefixSync, 'Remote marker write failed: ${resp.statusCode}');
-      return false;
     } catch (e, st) {
       AppLogger.error(logPrefixSync, 'Exception writing remote marker: $e', st);
       return false;
