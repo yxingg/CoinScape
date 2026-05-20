@@ -185,11 +185,23 @@ def save_series(data: dict):
 
 def delete_series(id: str):
     conn = get_connection()
-    conn.execute("DELETE FROM coin_series_link WHERE series_id = ?", (id,))
-    conn.execute("DELETE FROM series_images WHERE series_id = ?", (id,))
-    conn.execute("DELETE FROM series WHERE id = ?", (id,))
-    conn.commit()
-    conn.close()
+    # Collect image paths for this series so we can delete files if unreferenced
+    try:
+        rows = conn.execute("SELECT image_path FROM series_images WHERE series_id = ?", (id,)).fetchall()
+        img_paths = [r[0] for r in rows if r and r[0]]
+        for p in set(img_paths):
+            try:
+                _delete_image_if_unreferenced(conn, p, exclude_series_id=id)
+            except Exception:
+                # best-effort: don't let file-delete failures block DB cleanup
+                pass
+
+        conn.execute("DELETE FROM coin_series_link WHERE series_id = ?", (id,))
+        conn.execute("DELETE FROM series_images WHERE series_id = ?", (id,))
+        conn.execute("DELETE FROM series WHERE id = ?", (id,))
+        conn.commit()
+    finally:
+        conn.close()
 
 
 # ============================================================
@@ -222,11 +234,27 @@ def save_coin(data: dict):
 
 def delete_coin(id: str):
     conn = get_connection()
-    conn.execute("DELETE FROM coin_images WHERE coin_id = ?", (id,))
-    conn.execute("DELETE FROM coin_series_link WHERE coin_id = ?", (id,))
-    conn.execute("DELETE FROM coins WHERE id = ?", (id,))
-    conn.commit()
-    conn.close()
+    # Collect image paths for this coin (including first_image_path) so we can delete files if unreferenced
+    try:
+        rows = conn.execute("SELECT image_path FROM coin_images WHERE coin_id = ?", (id,)).fetchall()
+        img_paths = [r[0] for r in rows if r and r[0]]
+        coin_row = conn.execute("SELECT first_image_path FROM coins WHERE id = ?", (id,)).fetchone()
+        if coin_row and coin_row[0]:
+            img_paths.append(coin_row[0])
+
+        for p in set([x for x in img_paths if x]):
+            try:
+                _delete_image_if_unreferenced(conn, p, exclude_coin_id=id)
+            except Exception:
+                # best-effort
+                pass
+
+        conn.execute("DELETE FROM coin_images WHERE coin_id = ?", (id,))
+        conn.execute("DELETE FROM coin_series_link WHERE coin_id = ?", (id,))
+        conn.execute("DELETE FROM coins WHERE id = ?", (id,))
+        conn.commit()
+    finally:
+        conn.close()
 
 
 # ============================================================
@@ -283,6 +311,74 @@ def remove_coins_from_all_series(coin_ids: list[str]):
 # ============================================================
 # Image operations
 # ============================================================
+
+def _normalize_db_image_path(image_path: Optional[str]) -> Optional[str]:
+    """Normalize a stored DB image path to a filesystem-relative filename.
+
+    Returns None for paths that should not be handled (e.g. base64 data).
+    """
+    if not image_path or not isinstance(image_path, str):
+        return None
+    # ignore base64 inline data
+    if image_path.startswith('base64:'):
+        return None
+    normalized = image_path.replace('\\', '/').lstrip('/')
+    if normalized.startswith('images/'):
+        normalized = normalized[len('images/'):]
+    return normalized
+
+
+def _fs_path_for_db_path(image_path: str) -> Optional[str]:
+    n = _normalize_db_image_path(image_path)
+    if not n:
+        return None
+    return os.path.join(IMAGES_DIR, n)
+
+
+def _delete_image_if_unreferenced(conn: sqlite3.Connection, image_path: str, exclude_coin_id: str = None, exclude_series_id: str = None):
+    """Attempt to delete an image file if no other DB records reference it.
+
+    This is best-effort and will not raise on failure.
+    """
+    try:
+        other = 0
+        if exclude_coin_id:
+            other += conn.execute("SELECT COUNT(*) FROM coin_images WHERE image_path = ? AND coin_id != ?", (image_path, exclude_coin_id)).fetchone()[0]
+            other += conn.execute("SELECT COUNT(*) FROM series_images WHERE image_path = ?", (image_path,)).fetchone()[0]
+            other += conn.execute("SELECT COUNT(*) FROM coins WHERE first_image_path = ? AND id != ?", (image_path, exclude_coin_id)).fetchone()[0]
+        elif exclude_series_id:
+            other += conn.execute("SELECT COUNT(*) FROM series_images WHERE image_path = ? AND series_id != ?", (image_path, exclude_series_id)).fetchone()[0]
+            other += conn.execute("SELECT COUNT(*) FROM coin_images WHERE image_path = ?", (image_path,)).fetchone()[0]
+            other += conn.execute("SELECT COUNT(*) FROM coins WHERE first_image_path = ?", (image_path,)).fetchone()[0]
+        else:
+            other += conn.execute("SELECT COUNT(*) FROM coin_images WHERE image_path = ?", (image_path,)).fetchone()[0]
+            other += conn.execute("SELECT COUNT(*) FROM series_images WHERE image_path = ?", (image_path,)).fetchone()[0]
+            other += conn.execute("SELECT COUNT(*) FROM coins WHERE first_image_path = ?", (image_path,)).fetchone()[0]
+
+        if other == 0:
+            fs_path = _fs_path_for_db_path(image_path)
+            if fs_path and os.path.isfile(fs_path):
+                try:
+                    os.remove(fs_path)
+                except Exception:
+                    pass
+
+            # try removing thumbnail cache entries for this image
+            try:
+                cache_dir = os.path.join(IMAGES_DIR, ".thumb_cache")
+                if os.path.isdir(cache_dir) and fs_path:
+                    base = os.path.splitext(os.path.basename(fs_path))[0]
+                    for fname in os.listdir(cache_dir):
+                        if fname.startswith(base + "_") or fname.startswith(base):
+                            try:
+                                os.remove(os.path.join(cache_dir, fname))
+                            except Exception:
+                                pass
+            except Exception:
+                pass
+    except Exception:
+        # swallow all exceptions - deletion is best-effort
+        pass
 
 def get_coin_images(coin_id: str) -> list[dict]:
     return fetch_where("coin_images", "coin_id", coin_id)

@@ -1,5 +1,8 @@
+import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:drift/drift.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 import '../database/database.dart';
 import '../services/api_service.dart';
 
@@ -83,10 +86,48 @@ class CoinRepository {
     if (_useApi) {
       return ApiService.deleteSeries(seriesId);
     }
-    return db.transaction(() async {
+    // Collect series image paths first
+    final rows = await (db.select(db.seriesImages)..where((t) => t.seriesId.equals(seriesId))).get();
+    final imagePaths = rows.map((r) => r.imagePath).whereType<String>().toSet().toList();
+
+    // Delete DB records
+    await db.transaction(() async {
       await (db.delete(db.coinSeriesLink)..where((t) => t.seriesId.equals(seriesId))).go();
+      await (db.delete(db.seriesImages)..where((t) => t.seriesId.equals(seriesId))).go();
       await (db.delete(db.series)..where((t) => t.id.equals(seriesId))).go();
     });
+
+    // Best-effort: delete local files that are no longer referenced
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      for (final rel in imagePaths) {
+        final file = File(p.join(dir.path, rel.replaceAll('/', p.separator)));
+
+        // check remaining references
+        final otherCoinImgs = await (db.select(db.coinImages)..where((t) => t.imagePath.equals(rel))).get();
+        final otherSeriesImgs = await (db.select(db.seriesImages)..where((t) => t.imagePath.equals(rel))).get();
+        final otherFirst = await (db.select(db.coins)..where((t) => t.firstImagePath.equals(rel))).get();
+
+        if (otherCoinImgs.isEmpty && otherSeriesImgs.isEmpty && otherFirst.isEmpty) {
+          try {
+            if (await file.exists()) await file.delete();
+            // remove thumbnail cache if present
+            final cacheDir = Directory(p.join(dir.path, 'images', '.thumb_cache'));
+            if (await cacheDir.exists()) {
+              final base = p.basenameWithoutExtension(file.path);
+              for (final f in cacheDir.listSync()) {
+                final name = p.basename(f.path);
+                if (name.startsWith(base + '_') || name.startsWith(base)) {
+                  try {
+                    File(f.path).deleteSync();
+                  } catch (_) {}
+                }
+              }
+            }
+          } catch (_) {}
+        }
+      }
+    } catch (_) {}
   }
 
   /// 批量删除系列
@@ -94,12 +135,36 @@ class CoinRepository {
     if (_useApi) {
       return ApiService.deleteSeriesBatch(seriesIds);
     }
-    return db.transaction(() async {
+    // collect image paths for all series
+    final imagePaths = <String>{};
+    for (final seriesId in seriesIds) {
+      final rows = await (db.select(db.seriesImages)..where((t) => t.seriesId.equals(seriesId))).get();
+      imagePaths.addAll(rows.map((r) => r.imagePath).whereType<String>());
+    }
+
+    await db.transaction(() async {
       for (final seriesId in seriesIds) {
         await (db.delete(db.coinSeriesLink)..where((t) => t.seriesId.equals(seriesId))).go();
+        await (db.delete(db.seriesImages)..where((t) => t.seriesId.equals(seriesId))).go();
         await (db.delete(db.series)..where((t) => t.id.equals(seriesId))).go();
       }
     });
+
+    // cleanup files
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      for (final rel in imagePaths) {
+        final file = File(p.join(dir.path, rel.replaceAll('/', p.separator)));
+        final otherCoinImgs = await (db.select(db.coinImages)..where((t) => t.imagePath.equals(rel))).get();
+        final otherSeriesImgs = await (db.select(db.seriesImages)..where((t) => t.imagePath.equals(rel))).get();
+        final otherFirst = await (db.select(db.coins)..where((t) => t.firstImagePath.equals(rel))).get();
+        if (otherCoinImgs.isEmpty && otherSeriesImgs.isEmpty && otherFirst.isEmpty) {
+          try {
+            if (await file.exists()) await file.delete();
+          } catch (_) {}
+        }
+      }
+    } catch (_) {}
   }
 
   // ==========================================
@@ -199,11 +264,45 @@ class CoinRepository {
     if (_useApi) {
       return ApiService.deleteCoin(coinId);
     }
-    return db.transaction(() async {
+    // collect image paths
+    final rows = await (db.select(db.coinImages)..where((t) => t.coinId.equals(coinId))).get();
+    final imagePaths = rows.map((r) => r.imagePath).whereType<String>().toSet().toList();
+    final coinRow = await (db.select(db.coins)..where((t) => t.id.equals(coinId))).getSingleOrNull();
+    if (coinRow != null && coinRow.firstImagePath != null) imagePaths.add(coinRow.firstImagePath!);
+
+    await db.transaction(() async {
       await (db.delete(db.coinImages)..where((t) => t.coinId.equals(coinId))).go();
       await (db.delete(db.coinSeriesLink)..where((t) => t.coinId.equals(coinId))).go();
       await (db.delete(db.coins)..where((t) => t.id.equals(coinId))).go();
     });
+
+    // cleanup files
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      for (final rel in imagePaths) {
+        final file = File(p.join(dir.path, rel.replaceAll('/', p.separator)));
+        final otherCoinImgs = await (db.select(db.coinImages)..where((t) => t.imagePath.equals(rel))).get();
+        final otherSeriesImgs = await (db.select(db.seriesImages)..where((t) => t.imagePath.equals(rel))).get();
+        final otherFirst = await (db.select(db.coins)..where((t) => t.firstImagePath.equals(rel))).get();
+        if (otherCoinImgs.isEmpty && otherSeriesImgs.isEmpty && otherFirst.isEmpty) {
+          try {
+            if (await file.exists()) await file.delete();
+            final cacheDir = Directory(p.join(dir.path, 'images', '.thumb_cache'));
+            if (await cacheDir.exists()) {
+              final base = p.basenameWithoutExtension(file.path);
+              for (final f in cacheDir.listSync()) {
+                final name = p.basename(f.path);
+                if (name.startsWith(base + '_') || name.startsWith(base)) {
+                  try {
+                    File(f.path).deleteSync();
+                  } catch (_) {}
+                }
+              }
+            }
+          } catch (_) {}
+        }
+      }
+    } catch (_) {}
   }
 
   /// 批量删除纪念币
@@ -211,13 +310,37 @@ class CoinRepository {
     if (_useApi) {
       return ApiService.deleteCoinsBatch(coinIds);
     }
-    return db.transaction(() async {
+    // collect image paths for all coins
+    final imagePaths = <String>{};
+    for (final coinId in coinIds) {
+      final rows = await (db.select(db.coinImages)..where((t) => t.coinId.equals(coinId))).get();
+      imagePaths.addAll(rows.map((r) => r.imagePath).whereType<String>());
+      final coinRow = await (db.select(db.coins)..where((t) => t.id.equals(coinId))).getSingleOrNull();
+      if (coinRow != null && coinRow.firstImagePath != null) imagePaths.add(coinRow.firstImagePath!);
+    }
+
+    await db.transaction(() async {
       for (final coinId in coinIds) {
         await (db.delete(db.coinImages)..where((t) => t.coinId.equals(coinId))).go();
         await (db.delete(db.coinSeriesLink)..where((t) => t.coinId.equals(coinId))).go();
         await (db.delete(db.coins)..where((t) => t.id.equals(coinId))).go();
       }
     });
+
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      for (final rel in imagePaths) {
+        final file = File(p.join(dir.path, rel.replaceAll('/', p.separator)));
+        final otherCoinImgs = await (db.select(db.coinImages)..where((t) => t.imagePath.equals(rel))).get();
+        final otherSeriesImgs = await (db.select(db.seriesImages)..where((t) => t.imagePath.equals(rel))).get();
+        final otherFirst = await (db.select(db.coins)..where((t) => t.firstImagePath.equals(rel))).get();
+        if (otherCoinImgs.isEmpty && otherSeriesImgs.isEmpty && otherFirst.isEmpty) {
+          try {
+            if (await file.exists()) await file.delete();
+          } catch (_) {}
+        }
+      }
+    } catch (_) {}
   }
 
   // ==========================================

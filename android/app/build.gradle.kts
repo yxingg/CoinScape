@@ -14,18 +14,20 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    kotlinOptions {
-        jvmTarget = JavaVersion.VERSION_17.toString()
+    // 替换掉已弃用的 kotlinOptions.jvmTarget
+    kotlin {
+        compilerOptions {
+            jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+        }
     }
 
-    // ---------- 新增：固定签名配置 ----------
+    // 签名配置（Kotlin DSL 写法）
     signingConfigs {
-        // 创建一个名为 "fixed" 的签名配置，debug 和 release 都用它
-        fixed {
-            storeFile file('my-release-key.jks')   // keystore 文件放在 android/app/ 下
-            storePassword System.getenv("KEYSTORE_PASSWORD")
-            keyAlias System.getenv("KEY_ALIAS")
-            keyPassword System.getenv("KEY_PASSWORD")
+        create("fixed") {
+            storeFile = file("my-release-key.jks")
+            storePassword = System.getenv("KEYSTORE_PASSWORD")
+            keyAlias = System.getenv("KEY_ALIAS")
+            keyPassword = System.getenv("KEY_PASSWORD")
         }
     }
 
@@ -38,12 +40,11 @@ android {
     }
 
     buildTypes {
-        // 显式声明 debug 构建类型，并强制使用我们的固定签名
         debug {
-            signingConfig signingConfigs.fixed
+            signingConfig = signingConfigs.getByName("fixed")
         }
         release {
-            signingConfig signingConfigs.fixed   // 原本用的是 debug 签名，现在改成 fixed
+            signingConfig = signingConfigs.getByName("fixed")
         }
     }
 }
