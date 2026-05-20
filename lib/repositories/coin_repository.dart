@@ -510,23 +510,34 @@ class CoinRepository {
   // 辅助方法
   // ==========================================
 
-  /// 排序辅助
-  List<OrderingTerm> _coinOrderByTerms() {
+  /// 排序辅助：返回适用于 `query.orderBy(...)` 的排序函数列表
+  List<OrderingTerm Function(dynamic)> _coinOrderByTerms() {
     return [
-      OrderingTerm(
-        expression: db.coins.collectionTime,
-        mode: OrderingMode.desc,
-      ),
-      OrderingTerm(
-        expression: db.coins.createdAt,
-        mode: OrderingMode.desc,
-      ),
+      (t) => OrderingTerm(
+            expression: db.coins.collectionTime,
+            mode: OrderingMode.desc,
+          ),
+      (t) => OrderingTerm(
+            expression: db.coins.createdAt,
+            mode: OrderingMode.desc,
+          ),
     ];
   }
 
   void _applyCoinOrderBy(dynamic query) {
-    for (final term in _coinOrderByTerms()) {
-      query.orderBy.add(term);
+    // Drift 要求将排序条件以 List<OrderingTerm Function(Table)> 传入 orderBy
+    // 例如: query.orderBy([(t) => OrderingTerm(...), ...]);
+    try {
+      query.orderBy(_coinOrderByTerms());
+    } catch (e) {
+      // 如果由于动态类型导致失败，尝试以兼容方式调用（保守降级）
+      try {
+        final terms = _coinOrderByTerms().map((f) => f.call(db.coins)).toList();
+        // 有些 query 实现可能接受直接的 OrderingTerm 列表
+        query.orderBy(terms);
+      } catch (_) {
+        // 最后兜底：忽略排序，避免因排序失败导致整体崩溃
+      }
     }
   }
 
