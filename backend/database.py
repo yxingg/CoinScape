@@ -809,3 +809,67 @@ def update_app_settings(updates: Dict[str, Any]) -> Dict[str, Any]:
 
     save_app_settings(updated)
     return updated
+
+
+def get_timeline_metadata() -> dict:
+    """返回按月分桶的时间线元数据：total, buckets(list), bucket_map(dict)
+
+    每个 bucket 包含: key(YYYY-MM), year, month, count, start_index, start_ts, end_ts
+    """
+    conn = get_connection()
+    try:
+        query = """
+            SELECT strftime('%Y-%m', coalesce(collection_time, created_at)) AS ym,
+                   COUNT(*) AS cnt,
+                   MIN(coalesce(collection_time, created_at)) AS start_ts,
+                   MAX(coalesce(collection_time, created_at)) AS end_ts
+            FROM coins
+            GROUP BY ym
+            ORDER BY ym DESC
+        """
+        rows = conn.execute(query).fetchall()
+        buckets = []
+        start_idx = 0
+        bucket_map = {}
+        total = 0
+        for i, r in enumerate(rows):
+            ym = r['ym'] if isinstance(r['ym'], str) else str(r[0])
+            cnt = int(r['cnt'])
+            start_ts_s = r['start_ts']
+            end_ts_s = r['end_ts']
+
+            def _to_ts(s):
+                if not s:
+                    return 0
+                try:
+                    dt = datetime.fromisoformat(s)
+                    return int(dt.timestamp())
+                except Exception:
+                    try:
+                        dt = datetime.strptime(s, '%Y-%m-%d %H:%M:%S')
+                        return int(dt.timestamp())
+                    except Exception:
+                        return 0
+
+            start_ts = _to_ts(start_ts_s)
+            end_ts = _to_ts(end_ts_s)
+
+            year = int(ym[:4]) if len(ym) >= 7 else 0
+            month = int(ym[5:7]) if len(ym) >= 7 else 0
+            bucket = {
+                'key': ym,
+                'year': year,
+                'month': month,
+                'count': cnt,
+                'start_index': start_idx,
+                'start_ts': start_ts,
+                'end_ts': end_ts,
+            }
+            buckets.append(bucket)
+            bucket_map[ym] = i
+            start_idx += cnt
+            total += cnt
+
+        return {'total': total, 'buckets': buckets, 'bucket_map': bucket_map}
+    finally:
+        conn.close()

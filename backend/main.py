@@ -301,6 +301,15 @@ async def delete_series_batch(data: dict = Body(...)):
     except Exception:
         pass
     return {"success": True}
+# ============================================================
+# Timeline metadata (用于前端 Skeleton-first 的按月元数据接口)
+@app.get("/api/timeline/metadata")
+async def timeline_metadata():
+    try:
+        return db.get_timeline_metadata()
+    except Exception as e:
+        logger.exception("Failed to build timeline metadata: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to build timeline metadata")
 
 
 # ============================================================
