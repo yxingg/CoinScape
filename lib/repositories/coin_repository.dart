@@ -63,7 +63,7 @@ class CoinRepository {
       };
       return await ApiService.createSeries(data);
     }
-    await db.into(db.series).insert(series);
+    await db.into(db.series).insert(series, mode: InsertMode.insertOrReplace);
     return series.id.value;
   }
 
@@ -117,7 +117,7 @@ class CoinRepository {
               final base = p.basenameWithoutExtension(file.path);
               for (final f in cacheDir.listSync()) {
                 final name = p.basename(f.path);
-                if (name.startsWith(base + '_') || name.startsWith(base)) {
+                if (name.startsWith('${base}_') || name.startsWith(base)) {
                   try {
                     File(f.path).deleteSync();
                   } catch (_) {}
@@ -245,7 +245,7 @@ class CoinRepository {
       final data = _coinCompanionToJson(coin);
       return await ApiService.createCoin(data);
     }
-    await db.into(db.coins).insert(coin);
+    await db.into(db.coins).insert(coin, mode: InsertMode.insertOrReplace);
     return coin.id.value;
   }
 
@@ -292,7 +292,7 @@ class CoinRepository {
               final base = p.basenameWithoutExtension(file.path);
               for (final f in cacheDir.listSync()) {
                 final name = p.basename(f.path);
-                if (name.startsWith(base + '_') || name.startsWith(base)) {
+                if (name.startsWith('${base}_') || name.startsWith(base)) {
                   try {
                     File(f.path).deleteSync();
                   } catch (_) {}

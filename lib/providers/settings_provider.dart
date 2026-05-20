@@ -231,8 +231,7 @@ class SettingsNotifier extends StateNotifier<AppSettings> {
           // (so the web app will call the same host that served the files).
           if (ApiService.baseUrl == 'http://localhost:9876') {
             try {
-              final origin = '${Uri.base.scheme}://${Uri.base.host}' +
-                  (Uri.base.hasPort ? ':${Uri.base.port}' : '');
+              final origin = '${Uri.base.scheme}://${Uri.base.host}${Uri.base.hasPort ? ':${Uri.base.port}' : ''}';
               ApiService.setBaseUrl(origin);
             } catch (_) {}
           }

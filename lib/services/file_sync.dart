@@ -148,7 +148,7 @@ class FileSyncManager {
     // Ensure base path ends with a slash so resolve treats it as a directory
     var base = parsed;
     if (!base.path.endsWith('/')) {
-      base = base.replace(path: base.path + '/');
+      base = base.replace(path: '${base.path}/');
     }
 
     // Use posix join to avoid backslashes on Windows and normalize segments
@@ -236,7 +236,7 @@ class FileSyncManager {
               }
 
               final targetUri = _buildRemoteUri(url, remoteRoot, relPath);
-              final parsedTmp = targetUri.replace(path: targetUri.path + '.part');
+              final parsedTmp = targetUri.replace(path: '${targetUri.path}.part');
 
               final headers = <String, String>{};
               if (basicAuth != null) headers['Authorization'] = basicAuth;
@@ -485,7 +485,7 @@ class FileSyncManager {
             if (hrefEl == null) continue;
             final href = hrefEl.text;
             final parsedHref = Uri.parse(href);
-            final hrefUrl = (parsedHref.scheme.isEmpty ? uri.scheme : parsedHref.scheme) + '://' + (parsedHref.hasAuthority ? parsedHref.authority : uri.authority) + parsedHref.path;
+            final hrefUrl = '${parsedHref.scheme.isEmpty ? uri.scheme : parsedHref.scheme}://${parsedHref.hasAuthority ? parsedHref.authority : uri.authority}${parsedHref.path}';
 
             bool isDir = false;
             int? size;
@@ -678,7 +678,7 @@ class FileSyncManager {
           if (hrefEl == null) continue;
           final href = hrefEl.text;
           final parsedHref = Uri.parse(href);
-          final hrefUrl = (parsedHref.scheme.isEmpty ? uri.scheme : parsedHref.scheme) + '://' + (parsedHref.hasAuthority ? parsedHref.authority : uri.authority) + parsedHref.path;
+          final hrefUrl = '${parsedHref.scheme.isEmpty ? uri.scheme : parsedHref.scheme}://${parsedHref.hasAuthority ? parsedHref.authority : uri.authority}${parsedHref.path}';
 
           bool isDir = false;
           int? size;

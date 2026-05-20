@@ -106,7 +106,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       final auth = map['auth'] as Map<String, dynamic>?;
       final user = auth != null && auth['username'] is String ? auth['username'] as String : '';
       setState(() {
-        _acctUserCtrl.text = user;
+        // Keep the username input empty by default; show current username separately.
+        _acctUserCtrl.text = '';
         _storedAuthUsername = user;
       });
     } catch (_) {
@@ -116,7 +117,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           final sp = await SharedPreferences.getInstance();
           final localUser = sp.getString('local_auth_username') ?? 'admin';
           setState(() {
-            _acctUserCtrl.text = localUser;
+            _acctUserCtrl.text = '';
             _storedAuthUsername = localUser;
           });
           return;
@@ -325,12 +326,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         if (kIsWeb) {
           ok = await ApiService.login(_storedAuthUsername.isNotEmpty ? _storedAuthUsername : _acctUserCtrl.text.trim(), curPwd);
         } else {
-          // Native: verify against locally stored credentials in SharedPreferences
+          // Native: verify against locally stored password only. Username change is handled separately.
           final sp = await SharedPreferences.getInstance();
-          final storedUser = sp.getString('local_auth_username') ?? 'admin';
           final storedPwd = sp.getString('local_auth_password') ?? 'coinscape';
-          // Use stored user for verification (ignore _storedAuthUsername if empty)
-          if (curPwd == storedPwd && ( _acctUserCtrl.text.trim().isEmpty || _acctUserCtrl.text.trim() == storedUser)) {
+          if (curPwd == storedPwd) {
             ok = true;
           }
         }
@@ -714,19 +713,29 @@ AppLogger.error(logPrefixSettings, '下载失败 - $errorStr');
         } else if (skipAllConflicts) {
           continue;
         }
-        await repo.updateSeries(SeriesCompanion(
-          id: drift.Value(s.id),
-          name: drift.Value(s.name),
-          description: drift.Value(s.description),
-          createdAt: drift.Value(s.createdAt),
-        ));
+        try {
+          await repo.updateSeries(SeriesCompanion(
+            id: drift.Value(s.id),
+            name: drift.Value(s.name),
+            description: drift.Value(s.description),
+            createdAt: drift.Value(s.createdAt),
+          ));
+        } catch (e, st) {
+          AppLogger.error(logPrefixSettings, '合并 Series 失败: ${s.id} - ${s.name} - $e', st);
+          continue;
+        }
       } else {
-        await repo.insertSeries(SeriesCompanion.insert(
-          id: s.id,
-          name: s.name,
-          description: drift.Value(s.description),
-          createdAt: s.createdAt,
-        ));
+        try {
+          await repo.insertSeries(SeriesCompanion.insert(
+            id: s.id,
+            name: s.name,
+            description: drift.Value(s.description),
+            createdAt: s.createdAt,
+          ));
+        } catch (e, st) {
+          AppLogger.error(logPrefixSettings, '插入 Series 失败: ${s.id} - ${s.name} - $e', st);
+          continue;
+        }
       }
     }
 
@@ -745,59 +754,84 @@ AppLogger.error(logPrefixSettings, '下载失败 - $errorStr');
         } else if (skipAllConflicts) {
           continue;
         }
-        await repo.updateCoin(CoinsCompanion(
-          id: drift.Value(c.id),
-          name: drift.Value(c.name),
-          year: drift.Value(c.year),
-          faceValue: drift.Value(c.faceValue),
-          material: drift.Value(c.material),
-          weight: drift.Value(c.weight),
-          diameter: drift.Value(c.diameter),
-          mintage: drift.Value(c.mintage),
-          mint: drift.Value(c.mint),
-          grade: drift.Value(c.grade),
-          unitPrice: drift.Value(c.unitPrice),
-          quantity: drift.Value(c.quantity),
-          quantityUnit: drift.Value(c.quantityUnit),
-          collectionTime: drift.Value(c.collectionTime),
-          createdAt: drift.Value(c.createdAt),
-          comments: drift.Value(c.comments),
-          firstImagePath: drift.Value(c.firstImagePath),
-        ));
+        try {
+          await repo.updateCoin(CoinsCompanion(
+            id: drift.Value(c.id),
+            name: drift.Value(c.name),
+            year: drift.Value(c.year),
+            faceValue: drift.Value(c.faceValue),
+            material: drift.Value(c.material),
+            weight: drift.Value(c.weight),
+            diameter: drift.Value(c.diameter),
+            mintage: drift.Value(c.mintage),
+            mint: drift.Value(c.mint),
+            grade: drift.Value(c.grade),
+            unitPrice: drift.Value(c.unitPrice),
+            quantity: drift.Value(c.quantity),
+            quantityUnit: drift.Value(c.quantityUnit),
+            collectionTime: drift.Value(c.collectionTime),
+            createdAt: drift.Value(c.createdAt),
+            comments: drift.Value(c.comments),
+            firstImagePath: drift.Value(c.firstImagePath),
+          ));
+        } catch (e, st) {
+          AppLogger.error(logPrefixSettings, '合并 Coin 失败: ${c.id} - ${c.name} - $e', st);
+          continue;
+        }
       } else {
-        await repo.insertCoin(CoinsCompanion.insert(
-          id: c.id,
-          name: c.name,
-          year: drift.Value(c.year),
-          faceValue: drift.Value(c.faceValue),
-          material: drift.Value(c.material),
-          weight: drift.Value(c.weight),
-          diameter: drift.Value(c.diameter),
-          mintage: drift.Value(c.mintage),
-          mint: drift.Value(c.mint),
-          grade: drift.Value(c.grade),
-          unitPrice: drift.Value(c.unitPrice),
-          quantity: drift.Value(c.quantity),
-          quantityUnit: drift.Value(c.quantityUnit),
-          collectionTime: drift.Value(c.collectionTime),
-          createdAt: c.createdAt,
-          comments: drift.Value(c.comments),
-          firstImagePath: drift.Value(c.firstImagePath),
-        ));
+        try {
+          await repo.insertCoin(CoinsCompanion.insert(
+            id: c.id,
+            name: c.name,
+            year: drift.Value(c.year),
+            faceValue: drift.Value(c.faceValue),
+            material: drift.Value(c.material),
+            weight: drift.Value(c.weight),
+            diameter: drift.Value(c.diameter),
+            mintage: drift.Value(c.mintage),
+            mint: drift.Value(c.mint),
+            grade: drift.Value(c.grade),
+            unitPrice: drift.Value(c.unitPrice),
+            quantity: drift.Value(c.quantity),
+            quantityUnit: drift.Value(c.quantityUnit),
+            collectionTime: drift.Value(c.collectionTime),
+            createdAt: c.createdAt,
+            comments: drift.Value(c.comments),
+            firstImagePath: drift.Value(c.firstImagePath),
+          ));
+        } catch (e, st) {
+          AppLogger.error(logPrefixSettings, '插入 Coin 失败: ${c.id} - ${c.name} - $e', st);
+          continue;
+        }
       }
     }
 
-    // 处理Links
+    // 处理Links（每条单独容错）
     for (final l in incomingLinks) {
-      await repo.linkCoinToSeries(l.coinId, l.seriesId);
+      try {
+        await repo.linkCoinToSeries(l.coinId, l.seriesId);
+      } catch (e, st) {
+        AppLogger.error(logPrefixSettings, '合并 Link 失败: ${l.coinId} -> ${l.seriesId} - $e', st);
+        continue;
+      }
     }
 
-    // 图片关系
+    // 图片关系（每条单独容错）
     for (final img in incomingCoinImages) {
-      await repo.replaceCoinImages(img.coinId, [img.imagePath]);
+      try {
+        await repo.replaceCoinImages(img.coinId, [img.imagePath]);
+      } catch (e, st) {
+        AppLogger.error(logPrefixSettings, '合并 CoinImage 失败: ${img.coinId} - ${img.imagePath} - $e', st);
+        continue;
+      }
     }
     for (final img in incomingSeriesImages) {
-      await repo.replaceSeriesImages(img.seriesId, [img.imagePath]);
+      try {
+        await repo.replaceSeriesImages(img.seriesId, [img.imagePath]);
+      } catch (e, st) {
+        AppLogger.error(logPrefixSettings, '合并 SeriesImage 失败: ${img.seriesId} - ${img.imagePath} - $e', st);
+        continue;
+      }
     }
   }
 
@@ -866,7 +900,7 @@ AppLogger.error(logPrefixSettings, '下载失败 - $errorStr');
                       dense: true,
                       contentPadding: EdgeInsets.zero,
                     );
-                  }).toList(),
+                  }),
                   
                   const SizedBox(height: 16),
                   
@@ -947,9 +981,20 @@ AppLogger.error(logPrefixSettings, '下载失败 - $errorStr');
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
+                  // 显示当前用户名（只读），并提供可选的新用户名输入
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 8.0),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.person, size: 18, color: Colors.grey),
+                        const SizedBox(width: 8),
+                        Expanded(child: Text('当前用户名: ${_storedAuthUsername.isNotEmpty ? _storedAuthUsername : '未配置'}', style: const TextStyle(color: Colors.black87))),
+                      ],
+                    ),
+                  ),
                   TextFormField(
                     controller: _acctUserCtrl,
-                    decoration: const InputDecoration(labelText: '用户名'),
+                    decoration: const InputDecoration(labelText: '新用户名（留空则不修改）'),
                     textInputAction: TextInputAction.next,
                   ),
                   const SizedBox(height: 8),
@@ -1241,7 +1286,7 @@ AppLogger.error(logPrefixSettings, '下载失败 - $errorStr');
                       ],
                     ),
                   ),
-                  ...localFonts.map((font) => _buildFontOption(ctx, font.id, font.name, curId)).toList(),
+                  ...localFonts.map((font) => _buildFontOption(ctx, font.id, font.name, curId)),
                 ],
                 const Divider(height: 20),
                 ListTile(
@@ -1249,7 +1294,7 @@ AppLogger.error(logPrefixSettings, '下载失败 - $errorStr');
                   title: const Text('添加本地字体文件...'),
                   subtitle: const Text('支持 .ttf 和 .otf 格式'),
                   onTap: () async {
-                    Navigator.pop(context);
+                    Navigator.pop(ctx);
                     await _importLocalFonts();
                   },
                 ),
@@ -1259,7 +1304,7 @@ AppLogger.error(logPrefixSettings, '下载失败 - $errorStr');
                     title: const Text('管理本地字体...'),
                     subtitle: const Text('查看或删除已添加的字体'),
                     onTap: () async {
-                      Navigator.pop(context);
+                      Navigator.pop(ctx);
                       await _manageLocalFonts();
                     },
                   ),

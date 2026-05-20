@@ -187,17 +187,27 @@ class _CoinEditScreenState extends ConsumerState<CoinEditScreen> {
 
     );
 
-    if (isEdit) {
-      await repo.updateCoin(companion);
-    } else {
-      await repo.insertCoin(companion);
+    try {
+      if (isEdit) {
+        await repo.updateCoin(companion);
+      } else {
+        await repo.insertCoin(companion);
+      }
+
+      await repo.setCoinSeriesTags(coinId, _selectedSeriesIds.toList());
+      await repo.replaceCoinImages(coinId, _imagePaths);
+
+      if (!mounted) return;
+      Navigator.pop(context);
+    } catch (e, st) {
+      AppLogger.error(logPrefixDb, '保存纪念币失败: $e', st);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('保存失败，请检查数据完整性')),
+        );
+      }
+      return;
     }
-
-    await repo.setCoinSeriesTags(coinId, _selectedSeriesIds.toList());
-    await repo.replaceCoinImages(coinId, _imagePaths);
-
-    if (!mounted) return;
-    Navigator.pop(context);
   }
 
   @override
