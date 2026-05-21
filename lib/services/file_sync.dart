@@ -731,8 +731,19 @@ class FileSyncManager {
         if (rel.startsWith('.coinscape')) continue;
         if (rel.endsWith('coinscape.log') || rel.split('/').last == 'coinscape.log') continue;
 
-        final targetLocal = p.join(_baseDir, rel.replaceAll('/', p.separator));
-        final parentDir = Directory(p.dirname(targetLocal));
+        final relPathNormalized = rel.replaceAll('/', p.separator);
+        final targetLocal = p.join(_baseDir, relPathNormalized);
+        // If downloading coinscape.db, store it in an isolated import directory
+        // to avoid overwriting the live DB that the app may have open.
+        String actualTargetLocal = targetLocal;
+        final basename = p.basename(targetLocal);
+        if (basename == 'coinscape.db') {
+          final importDir = p.join(_baseDir, '.imported_dbs');
+          final importDirObj = Directory(importDir);
+          if (!await importDirObj.exists()) await importDirObj.create(recursive: true);
+          actualTargetLocal = p.join(importDir, 'coinscape_imported_${Uuid().v4()}.db');
+        }
+        final parentDir = Directory(p.dirname(actualTargetLocal));
         if (!await parentDir.exists()) await parentDir.create(recursive: true);
 
         try {
@@ -741,12 +752,13 @@ class FileSyncManager {
           final streamedGet = await client.send(getReq).timeout(const Duration(seconds: 120));
           final getResp = await http.Response.fromStream(streamedGet);
           if (getResp.statusCode == 200 || getResp.statusCode == 201) {
-            final tmpFile = File('$targetLocal.tmp');
+            final tmpFile = File('$actualTargetLocal.tmp');
             await tmpFile.writeAsBytes(getResp.bodyBytes);
-            await tmpFile.rename(targetLocal);
-            // detect if downloaded sqlite DB (coinscape.db under db/)
-            if (p.basename(targetLocal) == 'coinscape.db') {
-              importedDbPath = targetLocal;
+            await tmpFile.rename(actualTargetLocal);
+            // detect if downloaded sqlite DB (coinscape.db under db/) and
+            // point importedDbPath to the isolated imported copy
+            if (basename == 'coinscape.db') {
+              importedDbPath = actualTargetLocal;
             }
             downloaded += 1;
             // update index
@@ -765,6 +777,68 @@ class FileSyncManager {
       client.close();
     }
   }
+
+    /// Pull a single file from the remote WebDAV into local storage.
+    /// Returns a map similar to the pullAll result but scoped to one file.
+    Future<Map<String, dynamic>> pullOne(String relPath, Map<String, dynamic> webdavCfg) async {
+      await _ensureInit();
+      final url = webdavCfg['url'] as String? ?? '';
+      if (url.isEmpty) throw ArgumentError('WebDAV url not provided');
+
+      final user = webdavCfg['username'] as String? ?? '';
+      final password = webdavCfg['password'] as String? ?? '';
+      final remoteRoot = webdavCfg['remote_path'] as String? ?? '';
+
+      String? basicAuth;
+      if (user.isNotEmpty || password.isNotEmpty) {
+        basicAuth = 'Basic ' + base64Encode(utf8.encode('$user:$password'));
+      }
+
+      final client = http.Client();
+      try {
+        // build target URI for this file
+        final target = _buildRemoteUri(url, remoteRoot, relPath);
+
+        final getReq = http.Request('GET', target);
+        if (basicAuth != null) getReq.headers['Authorization'] = basicAuth;
+        final streamedGet = await client.send(getReq).timeout(const Duration(seconds: 120));
+        final getResp = await http.Response.fromStream(streamedGet);
+
+        if (getResp.statusCode == 200 || getResp.statusCode == 201) {
+          final relPathNormalized = relPath.replaceAll('/', p.separator);
+          final targetLocal = p.join(_baseDir, relPathNormalized);
+          String actualTargetLocal = targetLocal;
+          final basename = p.basename(targetLocal);
+          String? importedDbPath;
+          if (basename == 'coinscape.db') {
+            final importDir = p.join(_baseDir, '.imported_dbs');
+            final importDirObj = Directory(importDir);
+            if (!await importDirObj.exists()) await importDirObj.create(recursive: true);
+            actualTargetLocal = p.join(importDir, 'coinscape_imported_${Uuid().v4()}.db');
+            importedDbPath = actualTargetLocal;
+          }
+
+          final parentDir = Directory(p.dirname(actualTargetLocal));
+          if (!await parentDir.exists()) await parentDir.create(recursive: true);
+
+          final tmpFile = File('$actualTargetLocal.tmp');
+          await tmpFile.writeAsBytes(getResp.bodyBytes);
+          await tmpFile.rename(actualTargetLocal);
+
+          // update index entry
+          final existing = await _db!.getIndexByPath(relPath);
+          await _db!.upsertIndex(pathStr: relPath, sha256: existing?.sha256 ?? '', size: existing?.size ?? 0, mtime: existing?.mtime ?? 0.0, lastSeenAt: existing?.lastSeenAt ?? DateTime.now().toIso8601String(), lastSyncedAt: DateTime.now().toIso8601String(), remotePath: target.toString(), remoteEtag: getResp.headers['etag'] ?? getResp.headers['ETag']);
+
+          return {'result': {'success': true}, 'downloaded': 1, 'imported_db_path': importedDbPath};
+        }
+
+        return {'result': {'success': false, 'error': 'http:${getResp.statusCode}'}};
+      } catch (e) {
+        return {'result': {'success': false, 'error': e.toString()}};
+      } finally {
+        client.close();
+      }
+    }
 
   Future<bool> _writeRemoteBackupMarker(Map<String, dynamic> webdavCfg, String? isoTs) async {
     try {

@@ -135,8 +135,25 @@ class _SyncPreviewScreenState extends ConsumerState<SyncPreviewScreen> {
         return;
       }
 
-      // Native fallback not implemented here
-      throw Exception('本平台不支持直接拉取');
+      // Native fallback: use local FileSyncManager to pull a single file and
+      // refresh the preview. This allows preview-screen pulls on Android/iOS.
+      final fs = FileSyncManager.instance;
+      final cfg = {
+        'url': webdavCfg.url,
+        'username': webdavCfg.user,
+        'password': webdavCfg.password,
+        'remote_path': ''
+      };
+      final resp = await fs.pullOne(path, cfg);
+      final result = resp['result'] as Map<String, dynamic>?;
+      final ok = result != null && result['success'] == true;
+      if (ok) {
+        if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('拉取成功')));
+        await _loadPreview();
+      } else {
+        final err = result != null && result.containsKey('error') ? result['error'] : resp.toString();
+        if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('拉取失败: $err')));
+      }
     } catch (e, st) {
       AppLogger.error('[SYNC]', '拉取单文件失败: $e', st);
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('拉取失败: $e')));

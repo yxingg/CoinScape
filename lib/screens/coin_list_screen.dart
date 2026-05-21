@@ -1,8 +1,6 @@
 import 'dart:async';
-import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:printing/printing.dart';
 import 'package:drift/drift.dart' as drift;
@@ -42,7 +40,6 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
   final ScrollController _scrollController = ScrollController();
   TimelineController? _timelineController;
   int _currentTimelineIndex = 0;
-  int? _hoveredTimelineIndex;
   // 缓存上一次用于计算的 timeline 参数，避免重复创建
   String? _lastBucketsKey;
   int? _lastItemsPerRow;
@@ -51,11 +48,7 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
   double? _lastHeaderHeight;
 
   // 时间轴三层状态控制
-  double _timelineOpacity = 0.35; // 默认隐藏态（半透明）
   bool _isTimelineActive = false; // 是否处于活跃态
-  String? _dragTooltipText;       // 拖拽/悬停时显示的 Tooltip 文本
-  bool _showDragTooltip = false;  // 是否显示 Tooltip
-  double? _tooltipOffsetY;        // Tooltip 的 Y 轴位置
   Timer? _timelineHideTimer;      // 自动隐藏定时器
 
   // 云同步状态
@@ -82,23 +75,17 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
     _timelineHideTimer?.cancel();
     setState(() {
       _isTimelineActive = true;
-      _timelineOpacity = 1.0;
     });
     _timelineHideTimer = Timer(const Duration(seconds: 2), () {
       if (mounted) {
         setState(() {
           _isTimelineActive = false;
-          _timelineOpacity = 0.35;
-          _showDragTooltip = false;
         });
       }
     });
   }
 
-  /// 格式化 Tooltip 文本
-  String _getTooltipText(String key) {
-    return '$key年';
-  }
+  
 
   /// 滚动监听：滚动时立即完全显示 + 重置定时器
   void _onScrollChanged() {
@@ -147,13 +134,56 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
     return 36.0 + coins.length * 56.0;
   }
 
-  /// 计算滚动到指定分组索引的偏移量
-  double _getOffsetForGroup(int targetIndex, List<String> sortedKeys, Map<String, List<Coin>> groups) {
-    double offset = 0;
-    for (int i = 0; i < targetIndex; i++) {
-      offset += _getGroupHeight(sortedKeys[i], groups);
+  
+
+  String _formatBucketLabel(String key) {
+    if (key.contains('-')) {
+      final parts = key.split('-');
+      final y = parts.isNotEmpty ? parts[0] : key;
+      final m = parts.length > 1 ? parts[1] : '01';
+      final mm = m.padLeft(2, '0');
+      return '$y年 $mm月';
     }
-    return offset;
+    // fallback: year only
+    return '$key年';
+  }
+
+  void _handleScrubberDragStart(DragStartDetails details) {
+    _timelineController?.isActive.value = true;
+    setState(() {
+      _isTimelineActive = true;
+    });
+    _handleScrubberDragUpdate(DragUpdateDetails(globalPosition: details.globalPosition, localPosition: details.localPosition, delta: Offset.zero));
+  }
+
+  void _handleScrubberDragUpdate(DragUpdateDetails details) {
+    if (_timelineController == null || _timelineController!.calculator.buckets.isEmpty) return;
+
+    // determine container height
+    double height;
+    try {
+      final box = context.findRenderObject() as RenderBox?;
+      height = box?.size.height ?? MediaQuery.of(context).size.height;
+    } catch (_) {
+      height = MediaQuery.of(context).size.height;
+    }
+
+    final localY = details.localPosition.dy.clamp(0.0, height);
+    final rel = (height <= 0) ? 0.0 : (localY / height).clamp(0.0, 1.0);
+    final total = _timelineController!.calculator.totalContentHeight;
+    final targetOffset = rel * total;
+
+    // jump (throttled)
+    try {
+      _timelineController!.jumpToOffsetThrottled(targetOffset);
+    } catch (_) {}
+
+    _resetTimelineTimer();
+  }
+
+  void _handleScrubberDragEnd(DragEndDetails details) {
+    _timelineController?.isActive.value = false;
+    _resetTimelineTimer();
   }
 
   void _ensureTimelineController(
@@ -198,7 +228,7 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
     final groups = <String, List<Coin>>{};
     for (final coin in coins) {
       final time = coin.collectionTime ?? coin.createdAt;
-      final key = '${time.year}';
+      final key = '${time.year}-${time.month.toString().padLeft(2, '0')}';
       groups.putIfAbsent(key, () => []).add(coin);
     }
     return groups;
@@ -422,7 +452,7 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
       Padding(
         padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
         child: Text(
-          key,
+          _formatBucketLabel(key),
           style: TextStyle(
             fontSize: 14,
             fontWeight: FontWeight.bold,
@@ -462,7 +492,7 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
             Container(
               padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
               child: Text(
-                key,
+                _formatBucketLabel(key),
                 style: TextStyle(
                   fontSize: 14,
                   fontWeight: FontWeight.bold,
@@ -540,19 +570,26 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
           final sortedKeys = _getSortedGroupKeys(groups);
 
           // 构建主内容（两种视图都带分组）
-          Widget listContent = const SizedBox.shrink();
 
           // 更新当前滚动位置对应的时间段索引
           _updateCurrentIndex(sortedKeys, groups);
 
-          // 构建 Timeline buckets
+          // 构建 Timeline buckets（key 期望为 "YYYY-MM" 或 "YYYY"）
           final buckets = sortedKeys.map((k) {
             final count = groups[k]?.length ?? 0;
-            final year = int.tryParse(k) ?? 0;
+            int year = 0, month = 1;
+            if (k.contains('-')) {
+              final parts = k.split('-');
+              year = int.tryParse(parts[0]) ?? 0;
+              month = int.tryParse(parts[1]) ?? 1;
+            } else {
+              year = int.tryParse(k) ?? 0;
+              month = 1;
+            }
             return TimelineBucket(
               key: k,
               year: year,
-              month: 1,
+              month: month,
               count: count,
               startIndex: 0,
               startTs: 0,
@@ -560,10 +597,11 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
             );
           }).toList();
 
-          // 两种视图都显示时间轴：使用 LayoutBuilder 为主内容计算宽度并传入 itemsPerRow
-          return Row(
+          // 使用 Stack 覆盖式布局：列表占据全部空间，scrubber 作为浮层不占用布局宽度
+          return Stack(
             children: [
-              Expanded(
+              // 主内容（可用宽度用于计算 itemsPerRow）
+              Positioned.fill(
                 child: LayoutBuilder(builder: (ctx, constraints) {
                   final availableWidth = constraints.maxWidth;
                   const desiredItemWidth = 160.0;
@@ -581,12 +619,32 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
                 }),
               ),
 
-              // 右侧 scrubber（使用 TimelineController）
+              // 右侧 scrubber（浮层，不占布局宽度），在非激活时不拦截事件
               if (_timelineController != null)
-                Align(
-                  alignment: Alignment.centerRight,
-                  child: SizedBox(width: kIsWeb ? 140 : 48, child: TimelineScrubberWrapper(controller: _timelineController!)),
+                Positioned(
+                  right: 8,
+                  top: 0,
+                  bottom: 0,
+                  width: kIsWeb ? 140 : 48,
+                  child: IgnorePointer(
+                    ignoring: !_isTimelineActive,
+                    child: TimelineScrubberWrapper(controller: _timelineController!),
+                  ),
                 ),
+
+              // 窄边缘拖拽区：用于在 Android 上从右侧边缘直接拖拽唤起并控制时间轴（不占布局）
+              Positioned(
+                right: 0,
+                top: 0,
+                bottom: 0,
+                width: 20,
+                child: GestureDetector(
+                  behavior: HitTestBehavior.translucent,
+                  onVerticalDragStart: (d) => _handleScrubberDragStart(d),
+                  onVerticalDragUpdate: (d) => _handleScrubberDragUpdate(d),
+                  onVerticalDragEnd: (d) => _handleScrubberDragEnd(d),
+                ),
+              ),
             ],
           );
 
@@ -743,198 +801,7 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
   /// 构建右侧时间轴 — 自适应式侧边时间流索引
   /// 三层状态：活跃态(Active) / 延迟显示态(Delayed-Active) / 隐藏态(Passive)
   /// 交互：滚动同步、点击跳转、拖拽滑动、悬浮反馈、触觉反馈
-  Widget _buildTimeline(List<Coin> coins, Map<String, List<Coin>> groups, List<String> sortedKeys) {
-    if (sortedKeys.isEmpty) return const SizedBox(width: 0);
-
-    final primaryColor = Theme.of(context).colorScheme.primary;
-    final surfaceColor = Theme.of(context).colorScheme.surface;
-
-    return AnimatedOpacity(
-
-      duration: const Duration(milliseconds: 400),
-      opacity: _timelineOpacity,
-      child: Container(
-        width: 64,
-        decoration: BoxDecoration(
-          border: Border(left: BorderSide(
-            color: _isTimelineActive ? Colors.grey.shade300 : Colors.grey.shade100,
-            width: 1,
-          )),
-        ),
-        child: GestureDetector(
-          onVerticalDragStart: (details) {
-            _resetTimelineTimer();
-            setState(() {
-              _showDragTooltip = true;
-              _isTimelineActive = true;
-              _timelineOpacity = 1.0;
-            });
-            // 触觉反馈
-            HapticFeedback.mediumImpact();
-          },
-          onVerticalDragUpdate: (details) {
-            if (!_scrollController.hasClients) return;
-            _resetTimelineTimer();
-            final maxScroll = _scrollController.position.maxScrollExtent;
-            final minScroll = _scrollController.position.minScrollExtent;
-            final delta = -details.delta.dy;
-            final newOffset = (_scrollController.offset + delta).clamp(minScroll, maxScroll);
-            _scrollController.jumpTo(newOffset);
-
-            // 计算当前拖拽位置对应的时间段索引
-            final box = context.findRenderObject() as RenderBox?;
-            if (box != null) {
-              final localY = details.localPosition.dy;
-              final itemHeight = 48.0;
-              final index = (localY / itemHeight).floor().clamp(0, sortedKeys.length - 1);
-              setState(() {
-                _dragTooltipText = _getTooltipText(sortedKeys[index]);
-                _tooltipOffsetY = localY;
-              });
-              // 经过主要刻度时触发触觉反馈
-              if (index != _currentTimelineIndex) {
-                HapticFeedback.selectionClick();
-              }
-            }
-          },
-          onVerticalDragEnd: (_) {
-            _resetTimelineTimer();
-          },
-          child: Stack(
-            children: [
-              // 时间轴刻度列表
-              ListView.builder(
-                padding: const EdgeInsets.symmetric(vertical: 8),
-                physics: const NeverScrollableScrollPhysics(),
-                shrinkWrap: true,
-                itemCount: sortedKeys.length,
-                itemBuilder: (context, index) {
-                  final key = sortedKeys[index];
-                  final isCurrent = index == _currentTimelineIndex;
-                  final isHovered = index == _hoveredTimelineIndex;
-                  // 隐藏态：只显示轴线 + 小圆点，不显示文字
-                  final showLabel = _isTimelineActive || isCurrent;
-
-                  return MouseRegion(
-                    onEnter: (_) {
-                      setState(() {
-                        _hoveredTimelineIndex = index;
-                        _showDragTooltip = true;
-                        _dragTooltipText = _getTooltipText(key);
-                      });
-                      _resetTimelineTimer();
-                    },
-                    onExit: (_) {
-                      setState(() {
-                        _hoveredTimelineIndex = null;
-                        if (!_isTimelineActive) {
-                          _showDragTooltip = false;
-                        }
-                      });
-                    },
-                    child: GestureDetector(
-                      onTap: () {
-                        _resetTimelineTimer();
-                        final offset = _getOffsetForGroup(index, sortedKeys, groups);
-                        _scrollController.animateTo(
-                          offset,
-                          duration: const Duration(milliseconds: 300),
-                          curve: Curves.easeInOut,
-                        );
-                        HapticFeedback.lightImpact();
-                      },
-                      child: SizedBox(
-                        height: 48,
-                        child: Stack(
-                          alignment: Alignment.center,
-                          children: [
-                            // 轴线（垂直线）
-                            Positioned(
-                              left: 12,
-                              top: 0,
-                              bottom: 0,
-                              child: Container(
-                                width: 2,
-                                color: isCurrent
-                                    ? primaryColor.withValues(alpha: 0.4)
-                                    : Colors.grey.shade200,
-                              ),
-                            ),
-                            // 刻度标记（圆点）
-                            Positioned(
-                              left: 7,
-                              child: AnimatedContainer(
-                                duration: const Duration(milliseconds: 200),
-                                width: isCurrent ? 14 : 10,
-                                height: isCurrent ? 14 : 10,
-                                decoration: BoxDecoration(
-                                  shape: BoxShape.circle,
-                                  color: isCurrent
-                                      ? primaryColor
-                                      : (isHovered ? primaryColor.withValues(alpha: 0.6) : Colors.grey.shade300),
-                                  border: isCurrent
-                                      ? Border.all(color: surfaceColor, width: 2)
-                                      : null,
-                                  boxShadow: isCurrent
-                                      ? [BoxShadow(color: primaryColor.withValues(alpha: 0.3), blurRadius: 4)]
-                                      : null,
-                                ),
-                              ),
-                            ),
-                            // 年月标签（隐藏态时仅当前项显示）
-                            if (showLabel)
-                              Positioned(
-                                left: 28,
-                                child: Text(
-                                  key,
-                                  style: TextStyle(
-                                    fontSize: isCurrent ? 11 : 10,
-                                    fontWeight: isCurrent ? FontWeight.bold : FontWeight.normal,
-                                    color: isCurrent
-                                        ? primaryColor
-                                        : (isHovered ? primaryColor.withValues(alpha: 0.7) : Colors.grey.shade500),
-                                  ),
-                                ),
-                              ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  );
-                },
-              ),
-              // Tooltip 浮层（拖拽/悬停时显示）
-              if (_showDragTooltip && _dragTooltipText != null && _tooltipOffsetY != null)
-                Positioned(
-                  left: 0,
-                  top: (_tooltipOffsetY! - 14).clamp(0.0, double.infinity),
-                  child: IgnorePointer(
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
-                      decoration: BoxDecoration(
-                        color: primaryColor,
-                        borderRadius: BorderRadius.circular(4),
-                        boxShadow: [
-                          BoxShadow(color: Colors.black.withValues(alpha: 0.15), blurRadius: 4),
-                        ],
-                      ),
-                      child: Text(
-                        _dragTooltipText!,
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 10,
-                          fontWeight: FontWeight.w500,
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
+  
 
 
 

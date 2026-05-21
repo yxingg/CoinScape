@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show kIsWeb, defaultTargetPlatform, TargetPlatform;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -604,6 +605,22 @@ AppLogger.warning(logPrefixSettings, 'WebDAV 未配置');
               final syncDataImported = await SyncImporter.importFromSqlite(importedDbPath);
               await _mergeData(syncDataImported);
               if (mounted) DialogHelper.showSuccessSnackBar(context, '整包数据库已导入并合并成功');
+
+              // 删除临时导入的 sqlite 文件以释放存储空间（仅删除 .imported_dbs 下的文件以防误删）
+              try {
+                final f = File(importedDbPath);
+                if (await f.exists()) {
+                  final norm = p.normalize(importedDbPath);
+                  if (norm.contains('.imported_dbs')) {
+                    await f.delete();
+                    AppLogger.info(logPrefixSettings, '已删除临时导入数据库: $importedDbPath');
+                  } else {
+                    AppLogger.info(logPrefixSettings, '导入数据库不在 .imported_dbs，跳过自动删除: $importedDbPath');
+                  }
+                }
+              } catch (e) {
+                AppLogger.warning(logPrefixSettings, '删除临时导入数据库失败: $e');
+              }
             } catch (e, st) {
               AppLogger.error(logPrefixSettings, '导入远端 sqlite 并合并失败: $e', st);
               if (mounted) DialogHelper.showErrorSnackBar(context, '导入远端 sqlite 失败: $e');
@@ -1802,39 +1819,43 @@ DialogHelper.showSuccessSnackBar(context, value ? '已启用后端代理' : '已
 
                 final statusBox = ConstrainedBox(
                   constraints: BoxConstraints(minWidth: 160, maxWidth: MediaQuery.of(ctx).size.width * 0.45),
-                  child: Container(
-                    margin: const EdgeInsets.symmetric(horizontal: 8),
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                    decoration: BoxDecoration(
-                      color: _buildSyncBoxColor(),
+                  child: Tooltip(
+                    message: '刷新同步状态',
+                    child: InkWell(
                       borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: _buildSyncBoxBorderColor(), width: 1),
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.max,
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        _buildSyncBoxIcon(),
-                        const SizedBox(width: 8),
-                        Column(
-                          mainAxisSize: MainAxisSize.min,
-                          crossAxisAlignment: CrossAxisAlignment.start,
+                      onTap: _isCheckingBackend ? null : _refreshLatestChange,
+                      child: Container(
+                        margin: const EdgeInsets.symmetric(horizontal: 8),
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                        decoration: BoxDecoration(
+                          color: _buildSyncBoxColor(),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: _buildSyncBoxBorderColor(), width: 1),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.max,
+                          mainAxisAlignment: MainAxisAlignment.center,
                           children: [
-                            Text(_buildSyncBoxLabel(), style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: _buildSyncBoxTextColor())),
-                            const SizedBox(height: 2),
-                            Text(_latestChangeTime ?? '未查询', style: TextStyle(fontSize: 12, color: Colors.grey[700])),
+                            _buildSyncBoxIcon(),
+                            const SizedBox(width: 8),
+                            Column(
+                              mainAxisSize: MainAxisSize.min,
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(_buildSyncBoxLabel(), style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: _buildSyncBoxTextColor())),
+                                const SizedBox(height: 2),
+                                Text(_latestChangeTime ?? '未查询', style: TextStyle(fontSize: 12, color: Colors.grey[700])),
+                              ],
+                            ),
+                            const SizedBox(width: 6),
+                            // Removed separate IconButton; whole box is tappable.
+                            if (_isCheckingBackend)
+                              const SizedBox(width: 16, height: 16, child: SizedBox())
+                            else
+                              const SizedBox(width: 16, height: 16, child: SizedBox()),
                           ],
                         ),
-                        const SizedBox(width: 6),
-                        if (!_isCheckingBackend)
-                          IconButton(
-                            icon: const Icon(Icons.refresh, size: 16),
-                            onPressed: _refreshLatestChange,
-                            tooltip: '刷新同步状态',
-                            padding: EdgeInsets.zero,
-                            constraints: const BoxConstraints(minWidth: 24, minHeight: 24),
-                          ),
-                      ],
+                      ),
                     ),
                   ),
                 );

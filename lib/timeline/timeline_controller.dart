@@ -10,6 +10,8 @@ class TimelineController {
   final TimelineCalculator calculator;
   final ValueNotifier<String> currentDate = ValueNotifier<String>('');
   final ValueNotifier<double> thumbRelative = ValueNotifier<double>(0.0);
+  /// 外部激活标志（用于在外部拖拽时显示气泡/高亮）
+  final ValueNotifier<bool> isActive = ValueNotifier<bool>(false);
 
   final Duration throttleDuration;
   Timer? _throttleTimer;
@@ -73,5 +75,8 @@ class TimelineController {
     _throttleTimer?.cancel();
     currentDate.dispose();
     thumbRelative.dispose();
+    try {
+      isActive.dispose();
+    } catch (_) {}
   }
 }
