@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:math' as math;
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -10,6 +12,8 @@ import '../providers/coin_providers.dart';
 import '../providers/settings_provider.dart';
 import '../widgets/coin_image_widget.dart';
 import '../widgets/global_image_viewer.dart';
+import '../widgets/timeline_scrubber_wrapper.dart';
+import '../timeline/timeline.dart';
 import 'coin_edit_screen.dart';
 import 'settings_screen.dart';
 import '../utils/export_helper.dart';
@@ -36,8 +40,15 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
   late bool _imageView;
   final Set<String> _selectedCoinIds = {};
   final ScrollController _scrollController = ScrollController();
+  TimelineController? _timelineController;
   int _currentTimelineIndex = 0;
   int? _hoveredTimelineIndex;
+  // 缓存上一次用于计算的 timeline 参数，避免重复创建
+  String? _lastBucketsKey;
+  int? _lastItemsPerRow;
+  double? _lastItemHeight;
+  double? _lastVSpacing;
+  double? _lastHeaderHeight;
 
   // 时间轴三层状态控制
   double _timelineOpacity = 0.35; // 默认隐藏态（半透明）
@@ -61,6 +72,7 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
   void dispose() {
     _scrollController.removeListener(_onScrollChanged);
     _scrollController.dispose();
+    _timelineController?.dispose();
     _timelineHideTimer?.cancel();
     super.dispose();
   }
@@ -124,7 +136,14 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
   /// 估算一个分组的高度
   double _getGroupHeight(String key, Map<String, List<Coin>> groups) {
     final coins = groups[key]!;
-    // 分组标题约 36px + 每个纪念币约 56px (ListTile 默认高度)
+    // 如果是图片视图且已知每行项数，使用与 Grid 对应的高度估算
+    if (_imageView && _lastItemsPerRow != null && _lastItemHeight != null) {
+      final rows = (coins.length + _lastItemsPerRow! - 1) ~/ _lastItemsPerRow!;
+      final vSpacing = _lastVSpacing ?? 0.0;
+      final header = _lastHeaderHeight ?? 36.0;
+      return header + rows * (_lastItemHeight ?? 160.0) + (rows > 1 ? (rows - 1) * vSpacing : 0.0);
+    }
+    // 详情列表：分组标题约 36px + 每个纪念币约 56px (ListTile 默认高度)
     return 36.0 + coins.length * 56.0;
   }
 
@@ -135,6 +154,41 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
       offset += _getGroupHeight(sortedKeys[i], groups);
     }
     return offset;
+  }
+
+  void _ensureTimelineController(
+    List<TimelineBucket> buckets,
+    int itemsPerRow,
+    double itemHeight,
+    double vSpacing,
+    double headerHeight,
+  ) {
+    final bucketsKey = buckets.map((b) => '${b.key}:${b.count}').join('|');
+    final changed = bucketsKey != _lastBucketsKey || itemsPerRow != _lastItemsPerRow || itemHeight != _lastItemHeight || vSpacing != _lastVSpacing || headerHeight != _lastHeaderHeight;
+    if (!changed && _timelineController != null) return;
+
+    try {
+      _timelineController?.dispose();
+    } catch (_) {}
+
+    if (buckets.isEmpty) {
+      _timelineController = null;
+    } else {
+      final calculator = TimelineCalculator(
+        buckets: buckets,
+        itemsPerRow: itemsPerRow,
+        itemHeight: itemHeight,
+        vSpacing: vSpacing,
+        headerHeight: headerHeight,
+      );
+      _timelineController = TimelineController(scrollController: _scrollController, calculator: calculator);
+    }
+
+    _lastBucketsKey = bucketsKey;
+    _lastItemsPerRow = itemsPerRow;
+    _lastItemHeight = itemHeight;
+    _lastVSpacing = vSpacing;
+    _lastHeaderHeight = headerHeight;
   }
 
 
@@ -394,8 +448,9 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
     Map<String, List<Coin>> groups,
     List<String> sortedKeys,
     Map<String, String> seriesMap,
-    String? selectedSeriesId,
-  ) {
+    String? selectedSeriesId, {
+    required int itemsPerRow,
+  }) {
     return ScrollConfiguration(
       behavior: ScrollConfiguration.of(context).copyWith(scrollbars: false),
       child: ListView(
@@ -415,14 +470,14 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
                 ),
               ),
             ),
-            // 该组的网格
+            // 该组的网格（使用传入的 itemsPerRow）
             GridView.builder(
               shrinkWrap: true,
               physics: const NeverScrollableScrollPhysics(),
-              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: 3,
-                mainAxisSpacing: 12,
-                crossAxisSpacing: 12,
+              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: itemsPerRow,
+                mainAxisSpacing: 12.0,
+                crossAxisSpacing: 12.0,
                 childAspectRatio: 0.9,
               ),
               itemCount: groups[key]!.length,
@@ -485,26 +540,53 @@ class _CoinListScreenState extends ConsumerState<CoinListScreen> {
           final sortedKeys = _getSortedGroupKeys(groups);
 
           // 构建主内容（两种视图都带分组）
-          Widget listContent;
-          if (_imageView) {
-            listContent = _buildGroupedImageGrid(
-              coins, groups, sortedKeys, seriesMap, selectedSeries?.id,
-            );
-          } else {
-            listContent = _buildGroupedDetailList(
-              coins, groups, sortedKeys, seriesMap, selectedSeries?.id,
-            );
-          }
+          Widget listContent = const SizedBox.shrink();
 
           // 更新当前滚动位置对应的时间段索引
           _updateCurrentIndex(sortedKeys, groups);
 
-          // 两种视图都显示时间轴
+          // 构建 Timeline buckets
+          final buckets = sortedKeys.map((k) {
+            final count = groups[k]?.length ?? 0;
+            final year = int.tryParse(k) ?? 0;
+            return TimelineBucket(
+              key: k,
+              year: year,
+              month: 1,
+              count: count,
+              startIndex: 0,
+              startTs: 0,
+              endTs: 0,
+            );
+          }).toList();
+
+          // 两种视图都显示时间轴：使用 LayoutBuilder 为主内容计算宽度并传入 itemsPerRow
           return Row(
             children: [
-              Expanded(child: listContent),
-              // 右侧时间轴
-              _buildTimeline(coins, groups, sortedKeys),
+              Expanded(
+                child: LayoutBuilder(builder: (ctx, constraints) {
+                  final availableWidth = constraints.maxWidth;
+                  const desiredItemWidth = 160.0;
+                  const spacing = 12.0;
+                  final itemsPerRow = (availableWidth / (desiredItemWidth + spacing)).floor().clamp(1, 10);
+
+                  // 为 timeline 准备 controller（使用不同视图下的 itemHeight）
+                  final itemHeight = _imageView ? 160.0 : 56.0;
+                  _ensureTimelineController(buckets, itemsPerRow, itemHeight, 12.0, 36.0);
+
+                  if (_imageView) {
+                    return _buildGroupedImageGrid(coins, groups, sortedKeys, seriesMap, selectedSeries?.id, itemsPerRow: itemsPerRow);
+                  }
+                  return _buildGroupedDetailList(coins, groups, sortedKeys, seriesMap, selectedSeries?.id);
+                }),
+              ),
+
+              // 右侧 scrubber（使用 TimelineController）
+              if (_timelineController != null)
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: SizedBox(width: kIsWeb ? 140 : 48, child: TimelineScrubberWrapper(controller: _timelineController!)),
+                ),
             ],
           );
 
