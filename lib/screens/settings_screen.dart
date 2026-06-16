@@ -538,10 +538,17 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         };
         try {
           final res = await FileSyncManager.instance.pushAll(cfg);
-          if (res['process'] != null && (res['process']['succeeded'] as int) > 0) {
-            if (mounted) DialogHelper.showSuccessSnackBar(context, '本地上传已完成');
+          AppLogger.info(logPrefixSettings, 'pushAll result: $res');
+          final scan = res['scan'] as Map<String, dynamic>? ?? {};
+          final proc = res['process'] as Map<String, dynamic>? ?? {};
+          final scanned = scan['scanned'] ?? 0;
+          final succeeded = proc['succeeded'] ?? 0;
+          final processed = proc['processed'] ?? 0;
+          final failed = proc['failed'] ?? 0;
+          if (succeeded > 0) {
+            if (mounted) DialogHelper.showSuccessSnackBar(context, '本地上传已完成: 成功$succeeded/共$processed');
           } else {
-            if (mounted) DialogHelper.showErrorSnackBar(context, '本地上传完成（无文件或全部失败）');
+            if (mounted) DialogHelper.showErrorSnackBar(context, '上传失败: 扫描${scanned}个文件, 处理$processed个, 成功$succeeded, 失败$failed');
           }
         } catch (e) {
           if (mounted) DialogHelper.showErrorSnackBar(context, '本地上传失败: $e');

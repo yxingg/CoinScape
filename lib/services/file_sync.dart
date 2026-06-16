@@ -1,4 +1,4 @@
-import 'dart:async';
+﻿import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -86,8 +86,8 @@ class FileSyncManager {
 
     await for (final ent in root.list(recursive: true, followLinks: false)) {
       if (ent is! File) continue;
-      final rel = p.relative(ent.path, from: _baseDir).replaceAll('\\\\', '/');
-      if (rel == 'file_sync.db') continue;
+      final rel = p.relative(ent.path, from: _baseDir).replaceAll('\\', '/');
+      if (rel == 'file_sync.db' || rel.endsWith('/file_sync.db')) continue;
       if (rel.endsWith('coinscape.log') || p.basename(ent.path) == 'coinscape.log') continue;
 
       FileStat st;
@@ -205,6 +205,7 @@ class FileSyncManager {
       basicAuth = 'Basic ${base64Encode(utf8.encode('$user:$password'))}';
     }
 
+    AppLogger.info(logPrefixSync, 'processQueue: url=$url user=$user remoteRoot=$remoteRoot');
     final client = http.Client();
     var processed = 0, succeeded = 0, failed = 0;
 
@@ -230,6 +231,7 @@ class FileSyncManager {
               final local = p.join(_baseDir, relPath);
               final f = File(local);
               if (!f.existsSync()) {
+                AppLogger.warning(logPrefixSync, 'processQueue: local file missing: $local');
                 await _db!.updateQueueResult(taskId, 'failed', error: 'local_missing');
                 failed += 1;
                 return;
@@ -245,6 +247,7 @@ class FileSyncManager {
                 await _ensureRemoteParentDirs(client, parsedTmp, headers);
               } catch (_) {}
 
+              AppLogger.info(logPrefixSync, 'processQueue: uploading $relPath -> ${targetUri}');
               // read bytes in isolate
               Uint8List data;
               try {
