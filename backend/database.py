@@ -380,6 +380,92 @@ def _delete_image_if_unreferenced(conn: sqlite3.Connection, image_path: str, exc
         # swallow all exceptions - deletion is best-effort
         pass
 
+def cleanup_orphan_files() -> dict:
+    """Scan IMAGES_DIR and delete files not referenced by any DB record.
+
+    Also cleans orphan thumbnails from .thumb_cache.
+
+    Returns a summary dict with counts.
+    """
+    conn = get_connection()
+    try:
+        # Collect all referenced image paths from the DB
+        referenced = set()
+
+        rows = conn.execute("SELECT image_path FROM coin_images").fetchall()
+        for r in rows:
+            if r[0]:
+                referenced.add(r[0])
+
+        rows = conn.execute("SELECT image_path FROM series_images").fetchall()
+        for r in rows:
+            if r[0]:
+                referenced.add(r[0])
+
+        rows = conn.execute("SELECT first_image_path FROM coins WHERE first_image_path IS NOT NULL AND first_image_path != ''").fetchall()
+        for r in rows:
+            if r[0]:
+                referenced.add(r[0])
+
+        # Normalize referenced set to bare filenames (strip images/ prefix)
+        referenced_bare = set()
+        for p in referenced:
+            n = _normalize_db_image_path(p)
+            if n:
+                referenced_bare.add(n.lower())
+    finally:
+        conn.close()
+
+    deleted_files = 0
+    total_scanned = 0
+
+    # Scan images directory
+    if os.path.isdir(IMAGES_DIR):
+        for fname in os.listdir(IMAGES_DIR):
+            fpath = os.path.join(IMAGES_DIR, fname)
+            if not os.path.isfile(fpath):
+                continue
+            if fname.startswith('.'):
+                continue
+            total_scanned += 1
+            if fname.lower() not in referenced_bare:
+                try:
+                    os.remove(fpath)
+                    deleted_files += 1
+                except Exception:
+                    pass
+
+    # Clean orphan thumbnails
+    deleted_thumbs = 0
+    cache_dir = os.path.join(IMAGES_DIR, ".thumb_cache")
+    if os.path.isdir(cache_dir):
+        # Build set of base names that are still referenced
+        referenced_bases = set()
+        for bare in referenced_bare:
+            referenced_bases.add(os.path.splitext(bare)[0].lower())
+
+        for fname in os.listdir(cache_dir):
+            fpath = os.path.join(cache_dir, fname)
+            if not os.path.isfile(fpath):
+                continue
+            # thumbnail name is like <base>_<WxH>.<ext> or <base>.<ext>
+            thumb_base = fname.split('_')[0].lower()
+            thumb_base_no_ext = os.path.splitext(thumb_base)[0]
+            if thumb_base_no_ext not in referenced_bases:
+                try:
+                    os.remove(fpath)
+                    deleted_thumbs += 1
+                except Exception:
+                    pass
+
+    return {
+        'deleted_files': deleted_files,
+        'deleted_thumbs': deleted_thumbs,
+        'total_scanned': total_scanned,
+        'referenced_count': len(referenced_bare),
+    }
+
+
 def get_coin_images(coin_id: str) -> list[dict]:
     return fetch_where("coin_images", "coin_id", coin_id)
 

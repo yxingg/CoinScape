@@ -100,7 +100,7 @@ class SyncImporter {
         seriesImages: seriesImages,
       );
     } finally {
-      database.dispose();
+      database.close();
     }
   }
 

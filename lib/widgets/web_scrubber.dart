@@ -13,7 +13,6 @@ class WebScrubber extends StatefulWidget {
 
 class _WebScrubberState extends State<WebScrubber> {
   int? _hoverIndex;
-  bool _dragging = false;
 
   @override
   Widget build(BuildContext context) {
@@ -41,14 +40,14 @@ class _WebScrubberState extends State<WebScrubber> {
                       right: 6,
                       child: GestureDetector(
                         behavior: HitTestBehavior.translucent,
-                        onVerticalDragStart: (_) => setState(() => _dragging = true),
+                        onVerticalDragStart: (_) => setState(() {}),
                         onVerticalDragUpdate: (d) {
                           final localY = d.localPosition.dy.clamp(0.0, constraints.maxHeight);
                           final rel2 = (localY / constraints.maxHeight).clamp(0.0, 1.0);
                           final targetOffset = rel2 * widget.controller.calculator.totalContentHeight;
                           widget.controller.jumpToOffsetThrottled(targetOffset);
                         },
-                        onVerticalDragEnd: (_) => setState(() => _dragging = false),
+                        onVerticalDragEnd: (_) => setState(() {}),
                         child: Container(
                           width: 12,
                           height: 24,

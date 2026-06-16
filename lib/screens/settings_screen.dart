@@ -205,7 +205,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       // server timestamps are stored as UTC ISO without timezone marker; if no timezone present,
       // append 'Z' to force UTC parsing. Then convert to Beijing time (UTC+8).
       final hasZone = RegExp(r'[Zz]|[+-]\d\d:\d\d').hasMatch(iso);
-      final parsed = DateTime.parse(hasZone ? iso : (iso + 'Z'));
+      final parsed = DateTime.parse(hasZone ? iso : '$iso' 'Z');
       final utc = parsed.toUtc();
       final bj = utc.add(const Duration(hours: 8));
       return DateFormat('yyyy-MM-dd HH:mm:ss').format(bj);
@@ -674,7 +674,7 @@ AppLogger.error(logPrefixSettings, '下载失败 - $errorStr');
         try {
           // Use share_plus to open system share/save dialog which is SAF-friendly on Android
           final xfile = XFile(destPath);
-          await Share.shareXFiles([xfile], text: 'CoinScape 日志: $filename');
+          await SharePlus.instance.share(ShareParams(files: [xfile], text: 'CoinScape 日志: $filename'));
           if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('已创建临时日志并打开系统分享/保存对话')));
           AppLogger.info(logPrefixSettings, '日志已导出到临时文件并打开分享对话: $destPath');
         } catch (e) {
@@ -1436,7 +1436,7 @@ AppLogger.error(logPrefixSettings, '下载失败 - $errorStr');
             return ListTile(
               leading: const Icon(Icons.font_download),
               title: Text(font.name),
-              subtitle: Text('${font.fileExtension}'),
+              subtitle: Text(font.fileExtension),
               trailing: IconButton(
                 icon: const Icon(Icons.delete_outline, color: Colors.red),
                 onPressed: () async {
@@ -1964,9 +1964,10 @@ DialogHelper.showSuccessSnackBar(context, value ? '已启用后端代理' : '已
                               } catch (e) {
                                 if (mounted) DialogHelper.showErrorSnackBar(context, '重试失败: $e');
                               } finally {
-                                if (!mounted) return;
-                                setState(() => _isSyncing = false);
-                                _startStatusPolling();
+                                if (mounted) {
+                                  setState(() => _isSyncing = false);
+                                  _startStatusPolling();
+                                }
                               }
                             },
                             child: const Text('重试失败项'),
@@ -2005,7 +2006,7 @@ DialogHelper.showSuccessSnackBar(context, value ? '已启用后端代理' : '已
                         const SizedBox(height: 4),
                       ],
                       if (_latestChangeTime != null) ...[
-                        Text("最新修改时间: ${_latestChangeTime}", style: TextStyle(color: Colors.grey[600], fontSize: 12)),
+                        Text("最新修改时间: $_latestChangeTime", style: TextStyle(color: Colors.grey[600], fontSize: 12)),
                       ],
                       if (_latestChangeSource == null && _latestChangeTime == null) ...[
                         Text("同步状态尚未查询", style: TextStyle(color: Colors.grey[600])),
@@ -2047,6 +2048,9 @@ DialogHelper.showSuccessSnackBar(context, value ? '已启用后端代理' : '已
               // ===== 字体设置 =====
               _buildFontSettingsCard(context, settings),
 
+              // ===== 存储管理 =====
+              _buildStorageManagementCard(),
+
               // ===== WebDAV 云同步配置 =====
               _buildWebDavConfigCard(),
             ],
@@ -2060,5 +2064,98 @@ DialogHelper.showSuccessSnackBar(context, value ? '已启用后端代理' : '已
   Future<String> _getFontName(String fontId) async {
     await FontManager.getLocalFonts(); // 确保字体列表已加载
     return FontManager.getFontName(fontId);
+  }
+
+  bool _isCleaningStorage = false;
+
+  /// 构建存储管理卡片
+  Widget _buildStorageManagementCard() {
+    return Card(
+      elevation: 2,
+      margin: const EdgeInsets.only(bottom: 24),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 8.0),
+        child: Column(
+          children: [
+            const ListTile(
+              title: Text('存储管理', style: TextStyle(fontWeight: FontWeight.bold)),
+              subtitle: Text('清理无用的图片文件和缩略图缓存'),
+              leading: Icon(Icons.storage),
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16.0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const Text(
+                    '扫描图片目录，删除数据库中不再引用的孤立文件（包括图片和缩略图缓存）。'
+                    '新的图片上传将自动使用内容哈希命名，相同图片只保存一份。',
+                    style: TextStyle(fontSize: 13, color: Colors.grey),
+                  ),
+                  const SizedBox(height: 12),
+                  ElevatedButton.icon(
+                    onPressed: _isCleaningStorage ? null : _cleanupOrphanFiles,
+                    icon: _isCleaningStorage
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.delete_sweep, size: 18),
+                    label: Text(_isCleaningStorage ? '清理中...' : '清理无用文件'),
+                    style: ElevatedButton.styleFrom(
+                      minimumSize: const Size(double.infinity, 44),
+                      backgroundColor: Colors.orange.shade100,
+                      foregroundColor: Colors.orange.shade900,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _cleanupOrphanFiles() async {
+    final confirmed = await DialogHelper.showConfirmDialog(
+      context: context,
+      title: '清理无用文件',
+      content: '将扫描图片目录，删除数据库中不再引用的孤立图片和缩略图缓存。此操作不可撤销，确定继续？',
+      confirmText: '开始清理',
+      isDestructive: true,
+    );
+    if (confirmed != true) return;
+
+    setState(() => _isCleaningStorage = true);
+    try {
+      final repo = ref.read(coinRepositoryProvider);
+      final result = await repo.cleanupOrphanFiles();
+      if (!mounted) return;
+      final deletedFiles = result['deleted_files'] ?? 0;
+      final deletedThumbs = result['deleted_thumbs'] ?? 0;
+      final totalScanned = result['total_scanned'] ?? 0;
+      final referencedCount = result['referenced_count'] ?? 0;
+
+      if (deletedFiles == 0 && deletedThumbs == 0) {
+        DialogHelper.showSuccessSnackBar(
+          context,
+          '清理完成：扫描了 $totalScanned 个文件，无孤立文件需要清理（$referencedCount 个文件被引用）',
+        );
+      } else {
+        DialogHelper.showSuccessSnackBar(
+          context,
+          '清理完成：删除了 $deletedFiles 个孤立图片，$deletedThumbs 个缩略图（共扫描 $totalScanned 个文件）',
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        DialogHelper.showErrorSnackBar(context, '清理失败: $e');
+      }
+    } finally {
+      if (mounted) setState(() => _isCleaningStorage = false);
+    }
   }
 }

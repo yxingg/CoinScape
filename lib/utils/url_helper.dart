@@ -81,7 +81,7 @@ class UrlHelper {
     // 构建基础URL（包含WebDAV路径参数）
     String url = '$normalizedBase${normalizedProxyPath.substring(1)}';
     if (normalizedWebDavPath.isNotEmpty && normalizedWebDavPath != '/') {
-      url += '${normalizedWebDavPath.substring(1)}';
+      url += normalizedWebDavPath.substring(1);
     }
     url += '?target=$encodedTarget';
     

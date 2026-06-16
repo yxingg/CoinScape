@@ -59,7 +59,7 @@ class TimelineCalculator {
   /// 将内容区像素偏移转换为所属的日期键（"YYYY-MM"）——使用二分查找，复杂度 O(log M)。
   String offsetToDate(double offset) {
     if (buckets.isEmpty) return '';
-    offset = (offset).clamp(0.0, totalContentHeight) as double;
+    offset = offset.clamp(0.0, totalContentHeight);
     int lo = 0, hi = _bucketPrefixPx.length - 1;
     while (lo <= hi) {
       final mid = (lo + hi) >> 1;

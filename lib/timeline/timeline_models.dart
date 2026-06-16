@@ -38,5 +38,5 @@ class TimelineBucket {
         'end_ts': endTs,
       };
 
-  String get prettyLabel => "${year}年 ${month.toString().padLeft(2, '0')}月";
+  String get prettyLabel => "$year年 ${month.toString().padLeft(2, '0')}月";
 }

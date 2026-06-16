@@ -268,6 +268,11 @@ class ApiService {
     return '$_baseUrl/api/images/file/$imagePath?${params.join('&')}';
   }
 
+  /// 清理后端无引用的孤立图片文件
+  static Future<Map<String, dynamic>> cleanupOrphanFiles() async {
+    return await _post('/cleanup/orphan-files', {});
+  }
+
   // ==========================================
   // Fonts API
   // ==========================================

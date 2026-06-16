@@ -17,6 +17,7 @@ import os
 import json
 import shutil
 import uuid
+import hashlib
 import logging
 import logging.handlers
 import base64  # 添加base64导入
@@ -473,17 +474,19 @@ async def replace_series_images(series_id: str, data: dict = Body(...)):
 
 @app.post("/api/images/upload")
 async def upload_image(file: UploadFile = File(...)):
-    """Upload an image file and return its path."""
+    """Upload an image file and return its path. Uses MD5-based filename for dedup."""
     db.ensure_dirs()
     ext = os.path.splitext(file.filename or "image.jpg")[1] or ".jpg"
-    filename = f"{uuid.uuid4()}{ext}"
-    filepath = os.path.join(db.IMAGES_DIR, filename)
-    
     content = await file.read()
-    with open(filepath, "wb") as f:
-        f.write(content)
-    
-    # record local change so sync marker logic can use it
+
+    md5_hex = hashlib.md5(content).hexdigest()
+    filename = f"{md5_hex}{ext}"
+    filepath = os.path.join(db.IMAGES_DIR, filename)
+
+    if not os.path.isfile(filepath):
+        with open(filepath, "wb") as f:
+            f.write(content)
+
     try:
         _mark_local_change()
     except Exception:
@@ -561,6 +564,22 @@ async def get_image_file(filename: str, width: Optional[int] = None, height: Opt
             "Cache-Control": "public, max-age=3600",
         },
     )
+
+
+@app.post("/api/cleanup/orphan-files")
+async def cleanup_orphan_files():
+    """Scan images directory and delete files not referenced by any DB record."""
+    try:
+        result = await asyncio.to_thread(db.cleanup_orphan_files)
+        try:
+            _mark_local_change()
+        except Exception:
+            pass
+        return JSONResponse({"success": True, "result": result})
+    except Exception as e:
+        logger = logging.getLogger("coinscape.cleanup")
+        logger.exception("cleanup_orphan_files failed")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ============================================================
@@ -1357,12 +1376,17 @@ if os.path.isdir(_web_build_dir):
         
         file_path = os.path.join(_web_build_dir, full_path)
         if os.path.isfile(file_path):
-            return FileResponse(file_path)
+            ext = os.path.splitext(file_path)[1].lower()
+            if ext in ('.html', '.js', '.json'):
+                headers = {"Cache-Control": "no-cache, must-revalidate"}
+            else:
+                headers = {"Cache-Control": "public, max-age=604800"}
+            return FileResponse(file_path, headers=headers)
         
         # SPA fallback
         index_path = os.path.join(_web_build_dir, "index.html")
         if os.path.isfile(index_path):
-            return FileResponse(index_path)
+            return FileResponse(index_path, headers={"Cache-Control": "no-cache, must-revalidate"})
         
         raise HTTPException(status_code=404, detail="Not found")
     
@@ -1370,7 +1394,7 @@ if os.path.isdir(_web_build_dir):
     async def serve_root():
         index_path = os.path.join(_web_build_dir, "index.html")
         if os.path.isfile(index_path):
-            return FileResponse(index_path)
+            return FileResponse(index_path, headers={"Cache-Control": "no-cache, must-revalidate"})
         return JSONResponse({"error": "Web build not found. Run 'flutter build web --web-renderer canvaskit' first."})
 else:
     print(f"WARNING: Web build directory not found at {_web_build_dir}")

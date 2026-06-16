@@ -586,4 +586,105 @@ class CoinRepository {
       'first_image_path': c.firstImagePath.value,
     };
   }
+
+  // ==========================================
+  // 存储清理
+  // ==========================================
+
+  /// 清理无引用的孤立图片文件和缩略图缓存
+  /// Web 端调用后端 API，原生端扫描本地文件系统
+  Future<Map<String, int>> cleanupOrphanFiles() async {
+    if (_useApi) {
+      final res = await ApiService.cleanupOrphanFiles();
+      final result = res['result'] as Map<String, dynamic>? ?? {};
+      return {
+        'deleted_files': result['deleted_files'] as int? ?? 0,
+        'deleted_thumbs': result['deleted_thumbs'] as int? ?? 0,
+        'total_scanned': result['total_scanned'] as int? ?? 0,
+        'referenced_count': result['referenced_count'] as int? ?? 0,
+      };
+    }
+
+    // Native: collect all referenced image paths from DB
+    final referencedPaths = <String>{};
+
+    final coinImgRows = await db.select(db.coinImages).get();
+    for (final r in coinImgRows) {
+      if (r.imagePath.isNotEmpty) referencedPaths.add(r.imagePath);
+    }
+
+    final seriesImgRows = await db.select(db.seriesImages).get();
+    for (final r in seriesImgRows) {
+      if (r.imagePath.isNotEmpty) referencedPaths.add(r.imagePath);
+    }
+
+    final coinRows = await (db.select(db.coins)
+          ..where((t) => t.firstImagePath.isNotNull()))
+        .get();
+    for (final r in coinRows) {
+      if (r.firstImagePath != null && r.firstImagePath!.isNotEmpty) {
+        referencedPaths.add(r.firstImagePath!);
+      }
+    }
+
+    // Normalize to bare filenames (strip images/ prefix, lowercase)
+    final referencedBare = <String>{};
+    for (final path in referencedPaths) {
+      final normalized = path.replaceAll('\\', '/').replaceFirst(RegExp(r'^images/'), '').toLowerCase();
+      if (normalized.isNotEmpty && !normalized.startsWith('base64:')) {
+        referencedBare.add(normalized);
+      }
+    }
+
+    final dir = await getApplicationDocumentsDirectory();
+    final imagesDir = Directory(p.join(dir.path, 'images'));
+    var deletedFiles = 0;
+    var totalScanned = 0;
+
+    if (await imagesDir.exists()) {
+      await for (final entity in imagesDir.list(recursive: false)) {
+        if (entity is! File) continue;
+        final fname = p.basename(entity.path);
+        if (fname.startsWith('.')) continue;
+        totalScanned++;
+
+        if (!referencedBare.contains(fname.toLowerCase())) {
+          try {
+            await entity.delete();
+            deletedFiles++;
+          } catch (_) {}
+        }
+      }
+    }
+
+    // Clean orphan thumbnails
+    var deletedThumbs = 0;
+    final thumbDir = Directory(p.join(imagesDir.path, '.thumb_cache'));
+    if (await thumbDir.exists()) {
+      final referencedBases = <String>{};
+      for (final bare in referencedBare) {
+        referencedBases.add(p.basenameWithoutExtension(bare).toLowerCase());
+      }
+
+      await for (final entity in thumbDir.list(recursive: false)) {
+        if (entity is! File) continue;
+        final fname = p.basename(entity.path);
+        final thumbBase = fname.split('_').first.toLowerCase();
+        final thumbBaseNoExt = p.basenameWithoutExtension(thumbBase);
+        if (!referencedBases.contains(thumbBaseNoExt)) {
+          try {
+            await entity.delete();
+            deletedThumbs++;
+          } catch (_) {}
+        }
+      }
+    }
+
+    return {
+      'deleted_files': deletedFiles,
+      'deleted_thumbs': deletedThumbs,
+      'total_scanned': totalScanned,
+      'referenced_count': referencedBare.length,
+    };
+  }
 }

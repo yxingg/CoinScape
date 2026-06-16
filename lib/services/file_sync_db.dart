@@ -31,7 +31,7 @@ class SyncQueueTable extends Table {
 class FileSyncDb extends _$FileSyncDb {
   static FileSyncDb? _instance;
 
-  FileSyncDb._internal(QueryExecutor e) : super(e);
+  FileSyncDb._internal(super.e);
 
   static Future<FileSyncDb> getInstance() async {
     if (_instance != null) return _instance!;

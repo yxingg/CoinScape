@@ -16,7 +16,7 @@ import 'package:crypto/crypto.dart';
 import 'file_sync_db.dart';
 
 /// Lightweight client-side file sync manager
-/// - maintains a local SQLite index at <appDoc>/file_sync.db
+/// - maintains a local SQLite index at [appDoc]/file_sync.db
 /// - scans app documents directory for files (images, local DB, fonts)
 /// - uses size+mtime quick-check and SHA256 for verification (computed in isolate)
 /// - enqueues upload/delete tasks and processes queue asynchronously
@@ -175,7 +175,7 @@ class FileSyncManager {
     final segs = url.pathSegments.where((s) => s.isNotEmpty).toList();
     if (segs.isEmpty) return;
     for (var i = 1; i < segs.length; i++) {
-      final prefix = '/' + segs.sublist(0, i).join('/');
+      final prefix = '/${segs.sublist(0, i).join('/')}';
       final uri = Uri(scheme: url.scheme, host: url.host, port: url.hasPort ? url.port : null, path: prefix);
       try {
         final req = http.Request('MKCOL', uri);
@@ -202,7 +202,7 @@ class FileSyncManager {
 
     String? basicAuth;
     if (user.isNotEmpty || password.isNotEmpty) {
-      basicAuth = 'Basic ' + base64Encode(utf8.encode('$user:$password'));
+      basicAuth = 'Basic ${base64Encode(utf8.encode('$user:$password'))}';
     }
 
     final client = http.Client();
@@ -326,7 +326,7 @@ class FileSyncManager {
                         try {
                           await client.delete(parsedTmp, headers: headers).timeout(const Duration(seconds: 10));
                         } catch (_) {}
-                        final err = 'move_failed:${moveStatus}, put_target:${putFinal.statusCode}';
+                        final err = 'move_failed:$moveStatus, put_target:${putFinal.statusCode}';
                         await _db!.updateQueueResult(taskId, 'failed', error: err);
                         failed += 1;
                         return;
@@ -436,7 +436,7 @@ class FileSyncManager {
 
       String? basicAuth;
       if (user.isNotEmpty || password.isNotEmpty) {
-        basicAuth = 'Basic ' + base64Encode(utf8.encode('$user:$password'));
+        basicAuth = 'Basic ${base64Encode(utf8.encode('$user:$password'))}';
       }
 
       final client = http.Client();
@@ -483,7 +483,7 @@ class FileSyncManager {
           for (final responseEl in doc.findAllElements('response', namespace: ns)) {
             final hrefEl = responseEl.getElement('href', namespace: ns);
             if (hrefEl == null) continue;
-            final href = hrefEl.text;
+            final href = hrefEl.value ?? '';
             final parsedHref = Uri.parse(href);
             final hrefUrl = '${parsedHref.scheme.isEmpty ? uri.scheme : parsedHref.scheme}://${parsedHref.hasAuthority ? parsedHref.authority : uri.authority}${parsedHref.path}';
 
@@ -494,19 +494,19 @@ class FileSyncManager {
 
             for (final propstat in responseEl.findAllElements('propstat', namespace: ns)) {
               final statusEl = propstat.getElement('status', namespace: ns);
-              if (statusEl != null && !(statusEl.text.contains('200'))) continue;
+              if (statusEl != null && !(statusEl.value ?? '').contains('200')) continue;
               final prop = propstat.getElement('prop', namespace: ns);
               if (prop != null) {
                 final rt = prop.getElement('resourcetype', namespace: ns);
                 if (rt != null && rt.findElements('collection', namespace: ns).isNotEmpty) isDir = true;
                 final gl = prop.getElement('getcontentlength', namespace: ns);
-                if (gl != null && gl.text.isNotEmpty) {
-                  try { size = int.parse(gl.text); } catch (_) { size = null; }
+                if (gl != null && (gl.value ?? '').isNotEmpty) {
+                  try { size = int.parse(gl.value ?? ''); } catch (_) { size = null; }
                 }
                 final gm = prop.getElement('getlastmodified', namespace: ns);
-                if (gm != null) lastModified = gm.text;
+                if (gm != null) lastModified = gm.value;
                 final ge = prop.getElement('getetag', namespace: ns);
-                if (ge != null) etag = ge.text;
+                if (ge != null) etag = ge.value;
               }
               break;
             }
@@ -624,7 +624,7 @@ class FileSyncManager {
 
     String? basicAuth;
     if (user.isNotEmpty || password.isNotEmpty) {
-      basicAuth = 'Basic ' + base64Encode(utf8.encode('$user:$password'));
+      basicAuth = 'Basic ${base64Encode(utf8.encode('$user:$password'))}';
     }
 
     final client = http.Client();
@@ -676,7 +676,7 @@ class FileSyncManager {
         for (final responseEl in doc.findAllElements('response', namespace: ns)) {
           final hrefEl = responseEl.getElement('href', namespace: ns);
           if (hrefEl == null) continue;
-          final href = hrefEl.text;
+          final href = hrefEl.value ?? '';
           final parsedHref = Uri.parse(href);
           final hrefUrl = '${parsedHref.scheme.isEmpty ? uri.scheme : parsedHref.scheme}://${parsedHref.hasAuthority ? parsedHref.authority : uri.authority}${parsedHref.path}';
 
@@ -687,19 +687,19 @@ class FileSyncManager {
 
           for (final propstat in responseEl.findAllElements('propstat', namespace: ns)) {
             final statusEl = propstat.getElement('status', namespace: ns);
-            if (statusEl != null && !(statusEl.text.contains('200'))) continue;
+            if (statusEl != null && !(statusEl.value ?? '').contains('200')) continue;
             final prop = propstat.getElement('prop', namespace: ns);
             if (prop != null) {
               final rt = prop.getElement('resourcetype', namespace: ns);
               if (rt != null && rt.findElements('collection', namespace: ns).isNotEmpty) isDir = true;
               final gl = prop.getElement('getcontentlength', namespace: ns);
-              if (gl != null && gl.text.isNotEmpty) {
-                try { size = int.parse(gl.text); } catch (_) { size = null; }
+              if (gl != null && (gl.value ?? '').isNotEmpty) {
+                try { size = int.parse(gl.value ?? ''); } catch (_) { size = null; }
               }
               final gm = prop.getElement('getlastmodified', namespace: ns);
-              if (gm != null) lastModified = gm.text;
+              if (gm != null) lastModified = gm.value;
               final ge = prop.getElement('getetag', namespace: ns);
-              if (ge != null) etag = ge.text;
+              if (ge != null) etag = ge.value;
             }
             break;
           }
@@ -791,7 +791,7 @@ class FileSyncManager {
 
       String? basicAuth;
       if (user.isNotEmpty || password.isNotEmpty) {
-        basicAuth = 'Basic ' + base64Encode(utf8.encode('$user:$password'));
+        basicAuth = 'Basic ${base64Encode(utf8.encode('$user:$password'))}';
       }
 
       final client = http.Client();

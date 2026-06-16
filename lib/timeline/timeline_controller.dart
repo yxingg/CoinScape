@@ -36,7 +36,7 @@ class TimelineController {
 
   /// 在拖拽中使用的 jumpTo（节流），避免短时间大量 jumpTo 导致 UI 卡顿。
   void jumpToOffsetThrottled(double offset) {
-    _pendingOffset = (offset).clamp(0.0, calculator.totalContentHeight) as double;
+    _pendingOffset = offset.clamp(0.0, calculator.totalContentHeight);
     if (_throttleTimer == null || !_throttleTimer!.isActive) {
       _doJump();
       _throttleTimer = Timer(throttleDuration, _throttleTimerHandler);
