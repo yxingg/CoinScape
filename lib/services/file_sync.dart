@@ -503,11 +503,23 @@ class FileSyncManager {
             continue;
           }
 
+          // Parse PROPFIND XML - try namespace-aware first, fall back to local-name
           final ns = 'DAV:';
-          for (final responseEl in doc.findAllElements('response', namespace: ns)) {
-            final hrefEl = responseEl.getElement('href', namespace: ns);
+          var responseEls = doc.findAllElements('response', namespace: ns).toList();
+          if (responseEls.isEmpty) {
+            responseEls = doc.findAllElements('response').toList();
+          }
+          AppLogger.info(logPrefixSync, 'PROPFIND XML: found ${responseEls.length} response elements');
+          if (responseEls.isEmpty) {
+            final snippet = resp.body.length > 500 ? resp.body.substring(0, 500) : resp.body;
+            AppLogger.warning(logPrefixSync, 'PROPFIND no responses parsed, body: $snippet');
+          }
+
+          for (final responseEl in responseEls) {
+            var hrefEl = responseEl.getElement('href', namespace: ns);
+            hrefEl ??= responseEl.getElement('href');
             if (hrefEl == null) continue;
-            final href = hrefEl.value ?? '';
+            final href = hrefEl.innerText;
             final parsedHref = Uri.parse(href);
             final hrefUrl = '${parsedHref.scheme.isEmpty ? uri.scheme : parsedHref.scheme}://${parsedHref.hasAuthority ? parsedHref.authority : uri.authority}${parsedHref.path}';
 
@@ -516,21 +528,29 @@ class FileSyncManager {
             String? lastModified;
             String? etag;
 
-            for (final propstat in responseEl.findAllElements('propstat', namespace: ns)) {
-              final statusEl = propstat.getElement('status', namespace: ns);
-              if (statusEl != null && !(statusEl.value ?? '').contains('200')) continue;
-              final prop = propstat.getElement('prop', namespace: ns);
+            var propstatEls = responseEl.findAllElements('propstat', namespace: ns).toList();
+              if (propstatEls.isEmpty) propstatEls = responseEl.findAllElements('propstat').toList();
+              for (final propstat in propstatEls) {
+              var statusEl = propstat.getElement('status', namespace: ns);
+                statusEl ??= propstat.getElement('status');
+              if (statusEl != null && !(statusEl.innerText).contains('200')) continue;
+              var prop = propstat.getElement('prop', namespace: ns);
+                prop ??= propstat.getElement('prop');
               if (prop != null) {
-                final rt = prop.getElement('resourcetype', namespace: ns);
-                if (rt != null && rt.findElements('collection', namespace: ns).isNotEmpty) isDir = true;
-                final gl = prop.getElement('getcontentlength', namespace: ns);
-                if (gl != null && (gl.value ?? '').isNotEmpty) {
-                  try { size = int.parse(gl.value ?? ''); } catch (_) { size = null; }
+                var rt = prop.getElement('resourcetype', namespace: ns);
+                rt ??= prop.getElement('resourcetype');
+                if (rt != null && (rt.findElements('collection', namespace: ns).isNotEmpty || rt.findElements('collection').isNotEmpty)) isDir = true;
+                var gl = prop.getElement('getcontentlength', namespace: ns);
+                gl ??= prop.getElement('getcontentlength');
+                if (gl != null && (gl.innerText).isNotEmpty) {
+                  try { size = int.parse(gl.innerText); } catch (_) { size = null; }
                 }
-                final gm = prop.getElement('getlastmodified', namespace: ns);
-                if (gm != null) lastModified = gm.value;
-                final ge = prop.getElement('getetag', namespace: ns);
-                if (ge != null) etag = ge.value;
+                var gm = prop.getElement('getlastmodified', namespace: ns);
+                gm ??= prop.getElement('getlastmodified');
+                if (gm != null) lastModified = gm.innerText;
+                var ge = prop.getElement('getetag', namespace: ns);
+                ge ??= prop.getElement('getetag');
+                if (ge != null) etag = ge.innerText;
               }
               break;
             }
@@ -704,10 +724,13 @@ class FileSyncManager {
         }
 
         final ns = 'DAV:';
-        for (final responseEl in doc.findAllElements('response', namespace: ns)) {
-          final hrefEl = responseEl.getElement('href', namespace: ns);
+        var responseEls = doc.findAllElements('response', namespace: ns).toList();
+        if (responseEls.isEmpty) responseEls = doc.findAllElements('response').toList();
+        for (final responseEl in responseEls) {
+          var hrefEl = responseEl.getElement('href', namespace: ns);
+          hrefEl ??= responseEl.getElement('href');
           if (hrefEl == null) continue;
-          final href = hrefEl.value ?? '';
+          final href = hrefEl.innerText;
           final parsedHref = Uri.parse(href);
           final hrefUrl = '${parsedHref.scheme.isEmpty ? uri.scheme : parsedHref.scheme}://${parsedHref.hasAuthority ? parsedHref.authority : uri.authority}${parsedHref.path}';
 
@@ -716,21 +739,29 @@ class FileSyncManager {
           String? lastModified;
           String? etag;
 
-          for (final propstat in responseEl.findAllElements('propstat', namespace: ns)) {
-            final statusEl = propstat.getElement('status', namespace: ns);
-            if (statusEl != null && !(statusEl.value ?? '').contains('200')) continue;
-            final prop = propstat.getElement('prop', namespace: ns);
+          var propstatEls = responseEl.findAllElements('propstat', namespace: ns).toList();
+              if (propstatEls.isEmpty) propstatEls = responseEl.findAllElements('propstat').toList();
+              for (final propstat in propstatEls) {
+            var statusEl = propstat.getElement('status', namespace: ns);
+                statusEl ??= propstat.getElement('status');
+            if (statusEl != null && !(statusEl.innerText).contains('200')) continue;
+            var prop = propstat.getElement('prop', namespace: ns);
+                prop ??= propstat.getElement('prop');
             if (prop != null) {
-              final rt = prop.getElement('resourcetype', namespace: ns);
-              if (rt != null && rt.findElements('collection', namespace: ns).isNotEmpty) isDir = true;
-              final gl = prop.getElement('getcontentlength', namespace: ns);
-              if (gl != null && (gl.value ?? '').isNotEmpty) {
-                try { size = int.parse(gl.value ?? ''); } catch (_) { size = null; }
+              var rt = prop.getElement('resourcetype', namespace: ns);
+                rt ??= prop.getElement('resourcetype');
+              if (rt != null && (rt.findElements('collection', namespace: ns).isNotEmpty || rt.findElements('collection').isNotEmpty)) isDir = true;
+              var gl = prop.getElement('getcontentlength', namespace: ns);
+                gl ??= prop.getElement('getcontentlength');
+              if (gl != null && (gl.innerText).isNotEmpty) {
+                try { size = int.parse(gl.innerText); } catch (_) { size = null; }
               }
-              final gm = prop.getElement('getlastmodified', namespace: ns);
-              if (gm != null) lastModified = gm.value;
-              final ge = prop.getElement('getetag', namespace: ns);
-              if (ge != null) etag = ge.value;
+              var gm = prop.getElement('getlastmodified', namespace: ns);
+                gm ??= prop.getElement('getlastmodified');
+              if (gm != null) lastModified = gm.innerText;
+              var ge = prop.getElement('getetag', namespace: ns);
+                ge ??= prop.getElement('getetag');
+              if (ge != null) etag = ge.innerText;
             }
             break;
           }
