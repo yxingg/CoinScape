@@ -63,6 +63,10 @@ class _SyncPreviewScreenState extends ConsumerState<SyncPreviewScreen> {
         'remote_path': ''
       };
       final detailed = await fs.getDetailedStatus(webdavCfg: cfg);
+      AppLogger.info('[SYNC]', 'getDetailedStatus result: keys=${detailed.keys.toList()}');
+      AppLogger.info('[SYNC]', '  counts=${detailed["counts"]}');
+      AppLogger.info('[SYNC]', '  remote_preview count=${(detailed["remote_preview"] as List?)?.length ?? "null"}');
+      AppLogger.info('[SYNC]', '  pending_preview count=${(detailed["pending_preview"] as List?)?.length ?? "null"}');
 
       final counts = detailed['counts'] as Map<String, dynamic>? ?? {};
       final remotePreview = detailed['remote_preview'] as List<dynamic>? ?? [];

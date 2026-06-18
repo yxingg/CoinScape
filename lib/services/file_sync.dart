@@ -492,12 +492,14 @@ class FileSyncManager {
             continue;
           }
           final resp = await http.Response.fromStream(streamed);
+          AppLogger.info(logPrefixSync, 'PROPFIND ${urlStr}: status=${resp.statusCode}, bodyLen=${resp.body.length}');
           if (resp.statusCode < 200 || resp.statusCode >= 400) continue;
 
           xml.XmlDocument doc;
           try {
             doc = xml.XmlDocument.parse(resp.body);
           } catch (e) {
+          AppLogger.warning(logPrefixSync, 'PROPFIND XML parse failed: $e');
             continue;
           }
 
@@ -554,6 +556,8 @@ class FileSyncManager {
           }
         }
 
+        AppLogger.info(logPrefixSync, 'PROPFIND found ${remoteFiles.length} remote files');
+        for (final rf in remoteFiles) { AppLogger.info(logPrefixSync, '  remote: ${rf["path"]}'); }
         // compare with local index
         final newRemote = <Map<String, dynamic>>[];
         final modifiedRemote = <Map<String, dynamic>>[];

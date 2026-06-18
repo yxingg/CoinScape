@@ -152,7 +152,18 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         });
       }
     } catch (_) {
-      // ignore failures; UI will fall back to default text
+      // backend unreachable (native): fall back to local prefs
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        final localTs = prefs.getString('sync.last_local_change');
+        if (mounted) {
+          setState(() {
+            _latestChangeSource = localTs != null ? 'local' : null;
+            _latestChangeTime = _formatBeijing(localTs);
+            _hasQueriedLatestChange = true;
+          });
+        }
+      } catch (_) {}
     }
   }
 
