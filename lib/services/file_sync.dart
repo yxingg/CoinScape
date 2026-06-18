@@ -84,11 +84,14 @@ class FileSyncManager {
     final root = Directory(_baseDir);
     if (!root.existsSync()) return {'scanned': 0, 'deletions_enqueued': 0};
 
+    var fileCount = 0, enqueuedCount = 0;
     await for (final ent in root.list(recursive: true, followLinks: false)) {
       if (ent is! File) continue;
       final rel = p.relative(ent.path, from: _baseDir).replaceAll('\\', '/');
       if (rel == 'file_sync.db' || rel.endsWith('/file_sync.db')) continue;
       if (rel.endsWith('coinscape.log') || p.basename(ent.path) == 'coinscape.log') continue;
+
+      fileCount++;
 
       FileStat st;
       try {
@@ -99,14 +102,7 @@ class FileSyncManager {
       final size = st.size;
       final mtime = st.modified.millisecondsSinceEpoch / 1000.0;
 
-      final entry = await _db!.getIndexByPath(rel);
-      if (entry != null && entry.size == size && (entry.mtime ?? 0.0) == mtime) {
-        await _updateIndexSeen(rel, startTs);
-        seen.add(rel);
-        continue;
-      }
-
-      // compute sha256 in isolate (reading file synchronously in isolate)
+      // Always compute SHA256 and enqueue; remote-side dedup happens in processQueue
       String sha = '';
       try {
         sha = await compute(_sha256FileSync, ent.path);
@@ -114,18 +110,16 @@ class FileSyncManager {
         sha = '';
       }
 
-      if (entry == null || sha != (entry.sha256 ?? '')) {
-        await _upsertIndexEntry(rel, sha, size, mtime, startTs);
-        await _enqueue(rel, 'upload');
-      } else {
-        await _upsertIndexEntry(rel, sha, size, mtime, startTs,
-            lastSyncedAt: entry.lastSyncedAt, remotePath: entry.remotePath, remoteEtag: entry.remoteEtag);
-      }
+      await _upsertIndexEntry(rel, sha, size, mtime, startTs);
+      await _enqueue(rel, 'upload');
+      enqueuedCount++;
 
       seen.add(rel);
     }
 
-    // deletions
+    AppLogger.info(logPrefixSync, 'scanAndQueue done: scanned=$fileCount, enqueued=$enqueuedCount');
+
+    // deletions: indexed paths not seen locally
     final allIndex = await _db!.select(_db!.fileIndexTable).get();
     var deletedCount = 0;
     for (final r in allIndex) {
@@ -139,7 +133,7 @@ class FileSyncManager {
       }
     }
 
-    return {'scanned': seen.length, 'deletions_enqueued': deletedCount};
+    return {'scanned': fileCount, 'enqueued': enqueuedCount, 'deletions_enqueued': deletedCount};
   }
 
   // ------------------------------ remote URL builder ------------------------------
@@ -242,7 +236,32 @@ class FileSyncManager {
 
               final headers = <String, String>{};
               if (basicAuth != null) headers['Authorization'] = basicAuth;
-
+              // HEAD check: skip upload if remote file exists with same size
+              final localSize = f.lengthSync();
+              try {
+                final headResp = await client.head(targetUri, headers: headers).timeout(const Duration(seconds: 10));
+                if (headResp.statusCode == 200) {
+                  final remoteSize = int.tryParse(headResp.headers['content-length'] ?? '');
+                  if (remoteSize == localSize) {
+                    AppLogger.info(logPrefixSync, 'processQueue: skip (remote exists, same size): $relPath');
+                    await _db!.upsertIndex(
+                      pathStr: relPath,
+                      sha256: '',
+                      size: localSize,
+                      mtime: 0.0,
+                      lastSeenAt: DateTime.now().toIso8601String(),
+                      lastSyncedAt: DateTime.now().toIso8601String(),
+                      remotePath: targetUri.toString(),
+                      remoteEtag: headResp.headers['etag'] ?? headResp.headers['ETag'],
+                    );
+                    await _db!.updateQueueResult(taskId, 'done');
+                    succeeded += 1;
+                    return;
+                  }
+                }
+              } catch (_) {
+                // HEAD failed (file doesn't exist or network error) — proceed with upload
+              }
               try {
                 await _ensureRemoteParentDirs(client, parsedTmp, headers);
               } catch (_) {}
