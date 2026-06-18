@@ -557,6 +557,7 @@ class FileSyncManager {
         // compare with local index
         final newRemote = <Map<String, dynamic>>[];
         final modifiedRemote = <Map<String, dynamic>>[];
+        final syncedRemote = <Map<String, dynamic>>[];
         for (final rf in remoteFiles) {
           final rel = rf['path'] as String;
           final local = await _db!.getIndexByPath(rel);
@@ -569,14 +570,18 @@ class FileSyncManager {
             final letag = local.remoteEtag;
             if ((lsize == null && rsize != null) || (lsize != null && rsize != null && lsize != rsize) || (retag != null && letag != null && retag != letag)) {
               modifiedRemote.add({'path': rel, 'status': 'modified_remote', 'remote': {'size': rsize, 'last_modified': rf['last_modified'], 'etag': retag}});
+            } else {
+              syncedRemote.add({'path': rel, 'status': 'synced', 'remote': {'size': rsize, 'last_modified': rf['last_modified'], 'etag': retag}, 'local': {'size': lsize, 'last_synced_at': local.lastSyncedAt}});
             }
           }
         }
 
         remotePreview.addAll(newRemote.take(limit));
         remotePreview.addAll(modifiedRemote.take(limit));
+        remotePreview.addAll(syncedRemote.take(limit));
         counts['new_remote'] = newRemote.length;
         counts['modified_remote'] = modifiedRemote.length;
+        counts['synced'] = syncedRemote.length;
       } finally {
         client.close();
       }

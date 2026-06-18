@@ -81,6 +81,7 @@ class _SyncPreviewScreenState extends ConsumerState<SyncPreviewScreen> {
         _counts = {
           'new_remote': counts['new_remote'] ?? 0,
           'modified_remote': counts['modified_remote'] ?? 0,
+          'synced': counts['synced'] ?? 0,
           'local_only': counts['pending'] ?? 0,
         };
         _entries = entries;
@@ -201,7 +202,9 @@ class _SyncPreviewScreenState extends ConsumerState<SyncPreviewScreen> {
       trailing: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          if (status == 'new_remote' || status == 'modified_remote' || status == 'local_only')
+          if (status == 'synced')
+            const Icon(Icons.check_circle, color: Colors.green, size: 20)
+          else if (status == 'new_remote' || status == 'modified_remote' || status == 'local_only')
             ElevatedButton(
               onPressed: loading ? null : () => _pullOne(path),
               child: loading ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)) : const Text('拉取'),
@@ -243,6 +246,7 @@ class _SyncPreviewScreenState extends ConsumerState<SyncPreviewScreen> {
                     children: [
                       Expanded(child: Text('新文件: ${_counts['new_remote'] ?? 0}')),
                       Expanded(child: Text('改动: ${_counts['modified_remote'] ?? 0}')),
+                      Expanded(child: Text('已同步: ${_counts['synced'] ?? 0}')),
                       Expanded(child: Text('本地独有: ${_counts['local_only'] ?? 0}')),
                     ],
                   ),
