@@ -557,6 +557,11 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           final processed = proc['processed'] ?? 0;
           final failed = proc['failed'] ?? 0;
           if (succeeded > 0) {
+            // Save local change timestamp so status box can display it
+            try {
+              final prefs = await SharedPreferences.getInstance();
+              await prefs.setString('sync.last_local_change', DateTime.now().toUtc().toIso8601String());
+            } catch (_) {}
             if (mounted) DialogHelper.showSuccessSnackBar(context, '本地上传已完成: 成功$succeeded/共$processed');
           } else {
             if (mounted) DialogHelper.showErrorSnackBar(context, '上传失败: 扫描${scanned}个文件, 处理$processed个, 成功$succeeded, 失败$failed');
