@@ -965,6 +965,50 @@ class FileSyncManager {
       return false;
     }
   }
+
+  /// Read the remote backup marker (.coinscape/last_cloud_backup.txt) from WebDAV.
+  /// Returns the timestamp string (UTC ISO) if available, null otherwise.
+  Future<String?> readRemoteBackupMarker(Map<String, dynamic> webdavCfg) async {
+    final url = (webdavCfg['url'] ?? '') as String;
+    if (url.isEmpty) return null;
+    final username = (webdavCfg['username'] ?? '') as String;
+    final password = (webdavCfg['password'] ?? '') as String;
+    final remoteRoot = (webdavCfg['remote_path'] ?? '') as String;
+
+    String? basicAuth;
+    if (username.isNotEmpty || password.isNotEmpty) {
+      basicAuth = 'Basic ${base64Encode(utf8.encode('$username:$password'))}';
+    }
+
+    final meta = '.coinscape/last_cloud_backup.txt';
+    final target = _buildRemoteUri(url, remoteRoot, meta);
+
+    final client = http.Client();
+    try {
+      final headers = <String, String>{};
+      if (basicAuth != null) headers['Authorization'] = basicAuth;
+      final resp = await client.get(target, headers: headers).timeout(const Duration(seconds: 10));
+      if (resp.statusCode == 200 || resp.statusCode == 201) {
+        final text = resp.body.trim();
+        if (text.isEmpty) return null;
+        // Try parse as JSON (new format)
+        try {
+          final j = jsonDecode(text);
+          if (j is Map && j.containsKey('timestamp')) {
+            return j['timestamp'] as String?;
+          }
+        } catch (_) {}
+        // Fallback: treat as plain ISO text (old format)
+        return text;
+      }
+      return null;
+    } catch (e) {
+      AppLogger.debug(logPrefixSync, 'readRemoteBackupMarker failed: $e');
+      return null;
+    } finally {
+      client.close();
+    }
+  }
 }
 
 // ------------------------------ isolate helpers ------------------------------

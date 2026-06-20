@@ -130,81 +130,95 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     _refreshLatestChange();
   }
 
+  /// Compare local vs remote timestamps to determine sync status.
+  /// Same logic as backend GET /api/settings.
   Future<void> _loadLatestChangeInfo() async {
-    try {
-      final map = await ApiService.getAppSettings();
-      final sync = map['sync'] as Map<String, dynamic>?;
-      String? src;
-      String? t;
-      if (sync != null) {
-        if (sync['latest_change_source'] is String) src = sync['latest_change_source'] as String;
-        if (sync['latest_change_time'] is String) {
-          t = sync['latest_change_time'] as String;
-        } else if (sync['last_local_change'] is String) {
-          t = sync['last_local_change'] as String;
-        }
-      }
-      if (mounted) {
-        setState(() {
-          _latestChangeSource = src;
-          _latestChangeTime = _formatBeijing(t);
-          _hasQueriedLatestChange = true;
-        });
-      }
-    } catch (_) {
-      // backend unreachable (native): fall back to local prefs
+    String? lastLocal;
+    String? lastCloud;
+
+    // 1. Try backend API first (web mode)
+    if (kIsWeb) {
       try {
-        final prefs = await SharedPreferences.getInstance();
-        final localTs = prefs.getString('sync.last_local_change');
-        if (mounted) {
-          setState(() {
-            _latestChangeSource = localTs != null ? 'local' : null;
-            _latestChangeTime = _formatBeijing(localTs);
-            _hasQueriedLatestChange = true;
-          });
+        final map = await ApiService.getAppSettings();
+        final sync = map['sync'] as Map<String, dynamic>?;
+        if (sync != null) {
+          if (sync['latest_change_source'] is String) {
+            if (mounted) {
+              setState(() {
+                _latestChangeSource = sync['latest_change_source'] as String;
+                _latestChangeTime = _formatBeijing(sync['latest_change_time'] as String?);
+                _hasQueriedLatestChange = true;
+              });
+            }
+            return;
+          }
         }
       } catch (_) {}
+    }
+
+    // 2. Native mode: read local timestamp from SharedPreferences
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      lastLocal = prefs.getString('sync.last_local_change');
+    } catch (_) {}
+
+    // 3. Read remote marker from WebDAV
+    try {
+      final wcfg = ref.read(webDavConfigProvider);
+      if (wcfg.url.isNotEmpty) {
+        final cfg = {
+          'url': wcfg.url,
+          'username': wcfg.user,
+          'password': wcfg.password,
+          'remote_path': ''
+        };
+        lastCloud = await FileSyncManager.instance.readRemoteBackupMarker(cfg);
+      }
+    } catch (_) {}
+
+    // 4. Compare (same logic as backend)
+    DateTime? _parse(String? s) {
+      if (s == null || s.isEmpty) return null;
+      try { return DateTime.parse(s); } catch (_) { return null; }
+    }
+
+    final localDt = _parse(lastLocal);
+    final cloudDt = _parse(lastCloud);
+
+    String? source;
+    String? time;
+    if (localDt != null && cloudDt != null) {
+      if (localDt.isAfter(cloudDt)) {
+        source = 'local';
+        time = lastLocal;
+      } else if (cloudDt.isAfter(localDt)) {
+        source = 'cloud';
+        time = lastCloud;
+      } else {
+        source = 'equal';
+        time = lastLocal;
+      }
+    } else if (localDt != null) {
+      source = 'local';
+      time = lastLocal;
+    } else if (cloudDt != null) {
+      source = 'cloud';
+      time = lastCloud;
+    }
+
+    if (mounted) {
+      setState(() {
+        _latestChangeSource = source;
+        _latestChangeTime = _formatBeijing(time);
+        _hasQueriedLatestChange = true;
+      });
     }
   }
 
   Future<void> _refreshLatestChange() async {
     setState(() => _isCheckingBackend = true);
     try {
-      // try fetch server-side info when backend available
-      try {
-        final map = await ApiService.getAppSettings();
-        final sync = map['sync'] as Map<String, dynamic>?;
-        String? src;
-        String? t;
-        if (sync != null) {
-          if (sync['latest_change_source'] is String) src = sync['latest_change_source'] as String;
-          if (sync['latest_change_time'] is String) {
-            t = sync['latest_change_time'] as String;
-          } else if (sync['last_local_change'] is String) {
-            t = sync['last_local_change'] as String;
-          }
-        }
-        if (mounted) {
-          setState(() {
-            _latestChangeSource = src;
-            _latestChangeTime = _formatBeijing(t);
-            _hasQueriedLatestChange = true;
-          });
-        }
-      } catch (e) {
-        // backend unreachable: try local prefs for last_local_change
-        try {
-          final prefs = await SharedPreferences.getInstance();
-          final localTs = prefs.getString('sync.last_local_change');
-          if (mounted) {
-            setState(() {
-              _latestChangeSource = 'local';
-              _latestChangeTime = _formatBeijing(localTs);
-              _hasQueriedLatestChange = true;
-            });
-          }
-        } catch (_) {}
-      }
+      await _loadLatestChangeInfo();
     } finally {
       if (mounted) setState(() => _isCheckingBackend = false);
     }
