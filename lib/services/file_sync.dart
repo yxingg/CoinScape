@@ -61,11 +61,7 @@ class FileSyncManager {
     );
   }
 
-  Future<void> _updateIndexSeen(String relPath, String lastSeenAt) async {
-    await _db!.updateIndexSeen(relPath, lastSeenAt);
-  }
-
-  // Removed unused _removeIndex helper to avoid lints
+  // Removed unused _updateIndexSeen and _removeIndex helpers to avoid lints
 
   Future<void> _enqueue(String relPath, String action) async {
     // avoid duplicate pending/in-progress
@@ -636,10 +632,15 @@ class FileSyncManager {
       bool remoteMarkerSet = false;
       String? lastCloudBackup;
       try {
-        // prefer local last_local_change if stored in prefs, otherwise use now
         final prefs = await SharedPreferences.getInstance();
+        // Use a single UTC timestamp for both local and remote to avoid drift
+        final nowUtc = DateTime.now().toUtc().toIso8601String();
         final localTs = prefs.getString('sync.last_local_change');
-        final isoToWrite = localTs ?? DateTime.now().toIso8601String();
+        final isoToWrite = localTs ?? nowUtc;
+        // Ensure prefs has a timestamp (first run or missing)
+        if (localTs == null) {
+          await prefs.setString('sync.last_local_change', nowUtc);
+        }
         remoteMarkerSet = await _writeRemoteBackupMarker(webdavCfg, isoToWrite);
         if (remoteMarkerSet) lastCloudBackup = isoToWrite;
       } catch (e, st) {

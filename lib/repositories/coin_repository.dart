@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'package:drift/drift.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../database/database.dart';
 import '../services/api_service.dart';
 
@@ -13,6 +14,14 @@ class CoinRepository {
   final AppDatabase? _db;
 
   CoinRepository(this._db);
+
+  /// Record local data change timestamp for sync status tracking
+  Future<void> _markLocalChange() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('sync.last_local_change', DateTime.now().toUtc().toIso8601String());
+    } catch (_) {}
+  }
 
   bool get _useApi => kIsWeb;
 
@@ -64,6 +73,7 @@ class CoinRepository {
       return await ApiService.createSeries(data);
     }
     await db.into(db.series).insert(series, mode: InsertMode.insertOrReplace);
+    await _markLocalChange();
     return series.id.value;
   }
 
@@ -78,7 +88,9 @@ class CoinRepository {
       await ApiService.updateSeries(series.id.value, data);
       return true;
     }
-    return db.update(db.series).replace(series);
+    final r = await db.update(db.series).replace(series);
+    await _markLocalChange();
+    return r;
   }
 
   /// 删除系列
@@ -96,6 +108,7 @@ class CoinRepository {
       await (db.delete(db.seriesImages)..where((t) => t.seriesId.equals(seriesId))).go();
       await (db.delete(db.series)..where((t) => t.id.equals(seriesId))).go();
     });
+    await _markLocalChange();
 
     // Best-effort: delete local files that are no longer referenced
     try {
@@ -149,6 +162,7 @@ class CoinRepository {
         await (db.delete(db.series)..where((t) => t.id.equals(seriesId))).go();
       }
     });
+    await _markLocalChange();
 
     // cleanup files
     try {
@@ -246,6 +260,7 @@ class CoinRepository {
       return await ApiService.createCoin(data);
     }
     await db.into(db.coins).insert(coin, mode: InsertMode.insertOrReplace);
+    await _markLocalChange();
     return coin.id.value;
   }
 
@@ -256,7 +271,9 @@ class CoinRepository {
       await ApiService.updateCoin(coin.id.value, data);
       return true;
     }
-    return db.update(db.coins).replace(coin);
+    final r = await db.update(db.coins).replace(coin);
+    await _markLocalChange();
+    return r;
   }
 
   /// 删除纪念币
@@ -275,6 +292,7 @@ class CoinRepository {
       await (db.delete(db.coinSeriesLink)..where((t) => t.coinId.equals(coinId))).go();
       await (db.delete(db.coins)..where((t) => t.id.equals(coinId))).go();
     });
+    await _markLocalChange();
 
     // cleanup files
     try {
@@ -326,6 +344,7 @@ class CoinRepository {
         await (db.delete(db.coins)..where((t) => t.id.equals(coinId))).go();
       }
     });
+    await _markLocalChange();
 
     try {
       final dir = await getApplicationDocumentsDirectory();
@@ -356,6 +375,7 @@ class CoinRepository {
       CoinSeriesLinkCompanion.insert(coinId: coinId, seriesId: seriesId),
       mode: InsertMode.insertOrIgnore,
     );
+    await _markLocalChange();
   }
 
   /// 解除某个纪念币和系列的绑定
@@ -366,6 +386,7 @@ class CoinRepository {
     await (db.delete(db.coinSeriesLink)
           ..where((t) => t.coinId.equals(coinId) & t.seriesId.equals(seriesId)))
         .go();
+    await _markLocalChange();
   }
 
   Future<List<String>> getSeriesIdsForCoin(String coinId) async {
@@ -389,6 +410,7 @@ class CoinRepository {
             );
       }
     });
+    await _markLocalChange();
   }
 
   /// 批量将多个纪念币添加到多个系列
@@ -406,6 +428,7 @@ class CoinRepository {
         }
       }
     });
+    await _markLocalChange();
   }
 
   /// 批量将多个纪念币从所有系列中移除
@@ -418,6 +441,7 @@ class CoinRepository {
         await (db.delete(db.coinSeriesLink)..where((t) => t.coinId.equals(coinId))).go();
       }
     });
+    await _markLocalChange();
   }
 
   // ==========================================
