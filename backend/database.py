@@ -536,6 +536,42 @@ def export_all_data() -> dict:
     return data
 
 
+def _normalize_date(value):
+    """Convert any date value to ISO 8601 string for consistent storage.
+    Handles: int (ms since epoch), ISO strings, Dart DateTime format (+YYYYY-MM-DD...).
+    """
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        # Milliseconds since epoch → ISO string
+        try:
+            from datetime import datetime, timezone
+            dt = datetime.fromtimestamp(value / 1000.0, tz=timezone.utc)
+            return dt.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3]
+        except (ValueError, OSError, TypeError):
+            return str(value)
+    if isinstance(value, str):
+        # Already a normal ISO string (starts with 4-digit year)
+        if value[:1].isdigit() and len(value) >= 10 and value[4] == '-':
+            return value
+        # Dart extended format: +YYYYY-MM-DD... → try to convert
+        if value.startswith('+'):
+            try:
+                # Python can parse extended year ISO format
+                dt = datetime.fromisoformat(value.replace('+', ''))
+                return dt.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3]
+            except (ValueError, TypeError):
+                pass
+        # Try parsing as ISO
+        try:
+            from datetime import datetime
+            dt = datetime.fromisoformat(value.replace('Z', '+00:00').split('+')[0].split('-00:00')[0])
+            return dt.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3]
+        except (ValueError, TypeError):
+            return value
+    return str(value)
+
+
 def import_all_data(data: dict):
     """Import data from a dict (overwrites existing data)."""
     conn = get_connection()
@@ -552,7 +588,7 @@ def import_all_data(data: dict):
     for s in data.get("series", []):
         cursor.execute(
             "INSERT INTO series (id, name, description, created_at) VALUES (?, ?, ?, ?)",
-            (s["id"], s["name"], s.get("description"), s.get("created_at", datetime.now().isoformat()))
+            (s["id"], s["name"], s.get("description"), _normalize_date(s.get("created_at")) or datetime.now().isoformat())
         )
     
     # Import coins
@@ -567,7 +603,8 @@ def import_all_data(data: dict):
             c.get("material"), c.get("weight"), c.get("diameter"),
             c.get("mintage"), c.get("mint"), c.get("grade"),
             c.get("unit_price"), c.get("quantity"), c.get("quantity_unit"),
-            c.get("collection_time"), c.get("created_at", datetime.now().isoformat()),
+            _normalize_date(c.get("collection_time")),
+            _normalize_date(c.get("created_at")) or datetime.now().isoformat(),
             c.get("comments"), c.get("first_image_path")
         ))
     

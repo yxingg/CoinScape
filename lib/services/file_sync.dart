@@ -80,6 +80,20 @@ class FileSyncManager {
     final root = Directory(_baseDir);
     if (!root.existsSync()) return {'scanned': 0, 'deletions_enqueued': 0};
 
+    // Clean up unnecessary db/coinscape.db (Drift DB is at root, db/ copy is a stale leftover)
+    try {
+      final staleDb = File(p.join(_baseDir, 'db', 'coinscape.db'));
+      if (await staleDb.exists()) {
+        await staleDb.delete();
+        AppLogger.info(logPrefixSync, 'Deleted stale db/coinscape.db');
+        // Try to remove empty db/ directory
+        final dbDir = Directory(p.join(_baseDir, 'db'));
+        if (await dbDir.exists()) {
+          try { await dbDir.delete(); } catch (_) {}
+        }
+      }
+    } catch (_) {}
+
     var fileCount = 0, enqueuedCount = 0;
     await for (final ent in root.list(recursive: true, followLinks: false)) {
       if (ent is! File) continue;
@@ -284,7 +298,7 @@ class FileSyncManager {
                 await _ensureRemoteParentDirs(client, parsedTmp, headers);
               } catch (_) {}
 
-              AppLogger.info(logPrefixSync, 'processQueue: uploading $relPath -> ${targetUri}');
+              AppLogger.info(logPrefixSync, 'processQueue: uploading $relPath -> $targetUri');
               // read bytes in isolate
               Uint8List data;
               try {
@@ -510,7 +524,7 @@ class FileSyncManager {
             continue;
           }
           final resp = await http.Response.fromStream(streamed);
-          AppLogger.info(logPrefixSync, 'PROPFIND ${urlStr}: status=${resp.statusCode}, bodyLen=${resp.body.length}');
+          AppLogger.info(logPrefixSync, 'PROPFIND $urlStr: status=$resp.statusCode, bodyLen=${resp.body.length}');
           if (resp.statusCode < 200 || resp.statusCode >= 400) continue;
 
           xml.XmlDocument doc;

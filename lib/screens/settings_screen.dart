@@ -171,13 +171,13 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     } catch (_) {}
 
     // 4. Compare (same logic as backend)
-    DateTime? _parse(String? s) {
+    DateTime? parseDt(String? s) {
       if (s == null || s.isEmpty) return null;
       try { return DateTime.parse(s); } catch (_) { return null; }
     }
 
-    final localDt = _parse(lastLocal);
-    final cloudDt = _parse(lastCloud);
+    final localDt = parseDt(lastLocal);
+    final cloudDt = parseDt(lastCloud);
 
     String? source;
     String? time;
@@ -553,6 +553,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         }
         _startStatusPolling();
         try {
+          // Flush WAL journal so coinscape.db has latest data before upload
+          try { await ref.read(coinRepositoryProvider).checkpointWal(); } catch (_) {}
           final res = await FileSyncManager.instance.pushAll(wcfg.toSyncCfg());
           AppLogger.info(logPrefixSettings, 'pushAll result: $res');
           final scan = res['scan'] as Map<String, dynamic>? ?? {};
@@ -564,7 +566,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           if (succeeded > 0) {
             if (mounted) DialogHelper.showSuccessSnackBar(context, '本地上传已完成: 成功$succeeded/共$processed');
           } else {
-            if (mounted) DialogHelper.showErrorSnackBar(context, '上传失败: 扫描${scanned}个文件, 处理$processed个, 成功$succeeded, 失败$failed');
+            if (mounted) DialogHelper.showErrorSnackBar(context, '上传失败: 扫描$scanned个文件, 处理$processed个, 成功$succeeded, 失败$failed');
           }
         } catch (e) {
           if (mounted) DialogHelper.showErrorSnackBar(context, '本地上传失败: $e');
@@ -653,6 +655,17 @@ AppLogger.warning(logPrefixSettings, 'WebDAV 未配置');
           final downloaded = res['downloaded'] as int? ?? 0;
           final failed = res['failed'] as int? ?? 0;
           final importedDbPath = res['imported_db_path'] as String?;
+
+          // Sync local timestamp with remote marker after successful pull
+          if (downloaded > 0) {
+            try {
+              final remoteTs = await FileSyncManager.instance.readRemoteBackupMarker(wcfg.toSyncCfg());
+              if (remoteTs != null && remoteTs.isNotEmpty) {
+                final prefs = await SharedPreferences.getInstance();
+                await prefs.setString('sync.last_local_change', remoteTs);
+              }
+            } catch (_) {}
+          }
           if (importedDbPath != null && importedDbPath.isNotEmpty) {
             AppLogger.info(logPrefixSettings, '检测到远端 sqlite 已下载到本地: $importedDbPath，开始解析并合并');
             try {
@@ -751,8 +764,9 @@ AppLogger.warning(logPrefixSettings, 'WebDAV 未配置');
     final repo = ref.read(coinRepositoryProvider);
 
     // Backend exports snake_case keys (from SQLite), but Drift fromJson expects camelCase.
-    // Also backend sends ISO date strings, Drift expects DateTime objects.
-    Map<String, dynamic> _normalizeKeys(Map<String, dynamic> json) {
+    // Date values may be: ISO strings, integer ms-since-epoch, or Dart extended format (+YYYYY-...).
+    // Drift fromJson expects DateTime objects for date fields.
+    Map<String, dynamic> normalizeKeys(Map<String, dynamic> json) {
       final out = <String, dynamic>{};
       json.forEach((key, value) {
         // snake_case → camelCase
@@ -760,11 +774,33 @@ AppLogger.warning(logPrefixSettings, 'WebDAV 未配置');
           RegExp(r'_([a-z])'),
           (m) => m.group(1)!.toUpperCase(),
         ) : key;
-        // ISO string dates → DateTime
-        if (value is String && RegExp(r'^\d{4}-\d{2}-\d{2}T').hasMatch(value)) {
+        
+        // Convert date values to DateTime
+        if (value is int && value > 946684800000) {
+          // Likely milliseconds since epoch (after year 2000)
           try {
-            out[camel] = DateTime.parse(value);
+            out[camel] = DateTime.fromMillisecondsSinceEpoch(value);
           } catch (_) {
+            out[camel] = value;
+          }
+        } else if (value is String) {
+          // Normal ISO: 2026-06-14T00:00:00.000
+          if (RegExp(r'^\d{4}-\d{2}-\d{2}').hasMatch(value)) {
+            try {
+              out[camel] = DateTime.parse(value);
+            } catch (_) {
+              out[camel] = value;
+            }
+          }
+          // Dart extended format: +178141-03-31T00:00:00.000
+          else if (value.startsWith('+')) {
+            try {
+              // Strip the '+' and parse — Dart extended year is valid ISO 8601
+              out[camel] = DateTime.parse(value.substring(1));
+            } catch (_) {
+              out[camel] = value;
+            }
+          } else {
             out[camel] = value;
           }
         } else {
@@ -775,11 +811,11 @@ AppLogger.warning(logPrefixSettings, 'WebDAV 未配置');
     }
 
     // 解析云端数据 
-    final incomingSeries = data.series.map((e) => SeriesData.fromJson(_normalizeKeys(e as Map<String, dynamic>))).toList();
-    final incomingCoins = data.coins.map((e) => Coin.fromJson(_normalizeKeys(e as Map<String, dynamic>))).toList();
-    final incomingLinks = data.links.map((e) => CoinSeriesLinkData.fromJson(_normalizeKeys(e as Map<String, dynamic>))).toList();
-    final incomingCoinImages = data.coinImages.map((e) => CoinImage.fromJson(_normalizeKeys(e as Map<String, dynamic>))).toList();
-    final incomingSeriesImages = data.seriesImages.map((e) => SeriesImage.fromJson(_normalizeKeys(e as Map<String, dynamic>))).toList();
+    final incomingSeries = data.series.map((e) => SeriesData.fromJson(normalizeKeys(e as Map<String, dynamic>))).toList();
+    final incomingCoins = data.coins.map((e) => Coin.fromJson(normalizeKeys(e as Map<String, dynamic>))).toList();
+    final incomingLinks = data.links.map((e) => CoinSeriesLinkData.fromJson(normalizeKeys(e as Map<String, dynamic>))).toList();
+    final incomingCoinImages = data.coinImages.map((e) => CoinImage.fromJson(normalizeKeys(e as Map<String, dynamic>))).toList();
+    final incomingSeriesImages = data.seriesImages.map((e) => SeriesImage.fromJson(normalizeKeys(e as Map<String, dynamic>))).toList();
 
     // 筛选冲突
     final existingSeries = await repo.getAllSeries();

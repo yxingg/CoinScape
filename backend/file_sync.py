@@ -668,20 +668,31 @@ class FileSyncManager:
                 downloaded += 1
 
                 # if this is the sqlite DB file, extract and import
-                if rel in ('db/coinscape.db', 'coinscape.db'):
+                # Prioritize root-level coinscape.db (Android data) over db/coinscape.db (backend's own old data).
+                # Once we've imported from one source, skip the other to avoid overwriting.
+                if rel == 'coinscape.db' and not imported_db:
                     try:
                         temp_db_path = target_local
                         data = await asyncio.to_thread(self._extract_data_from_sqlite_file, temp_db_path)
                         if data:
                             await asyncio.to_thread(db.import_all_data, data)
                             imported_db = True
-                            # Clean up staging copy (not the working DB)
-                            if rel != 'db/coinscape.db':
-                                try:
-                                    os.remove(target_local)
-                                    logger.info('Cleaned up staging file: %s', rel)
-                                except Exception:
-                                    pass
+                            # Clean up staging copy
+                            try:
+                                os.remove(target_local)
+                                logger.info('Cleaned up staging file: %s', rel)
+                            except Exception:
+                                pass
+                    except Exception as e:
+                        await asyncio.to_thread(self._db_mark_queue_failed, -1, f'db_import_error:{e}')
+                        failed += 1
+                elif rel == 'db/coinscape.db' and not imported_db:
+                    try:
+                        temp_db_path = target_local
+                        data = await asyncio.to_thread(self._extract_data_from_sqlite_file, temp_db_path)
+                        if data:
+                            await asyncio.to_thread(db.import_all_data, data)
+                            imported_db = True
                     except Exception as e:
                         await asyncio.to_thread(self._db_mark_queue_failed, -1, f'db_import_error:{e}')
                         failed += 1
@@ -703,17 +714,11 @@ class FileSyncManager:
                     except Exception as e:
                         logger.warning('Failed to import .ccm backup %s: %s', rel, e)
 
-        # After all files processed, update local last_local_change to remote marker timestamp if available
-        if remote_ts:
-            try:
-                await asyncio.to_thread(db.update_app_settings, {'sync': {'last_local_change': remote_ts}})
-            except Exception:
-                pass
-
         # Fallback: if no DB was imported during download, check if a local coinscape.db exists
         # (may have been downloaded in a previous pull or placed manually) and import it.
+        # Prioritize root-level coinscape.db (Android data) over db/coinscape.db (backend's own old data).
         if not imported_db:
-            for candidate_rel in ('db/coinscape.db', 'coinscape.db'):
+            for candidate_rel in ('coinscape.db', 'db/coinscape.db'):
                 candidate_path = os.path.join(self.save_path, candidate_rel.replace('/', os.sep))
                 if os.path.isfile(candidate_path):
                     try:
@@ -753,6 +758,14 @@ class FileSyncManager:
                             break
             except Exception as e:
                 logger.warning('Fallback .ccm scan failed: %s', e)
+
+        # After pull, sync local timestamp with remote so status shows "已同步"
+        # Use remote marker time if available, otherwise use current time
+        sync_ts = remote_ts or datetime.utcnow().isoformat()
+        try:
+            await asyncio.to_thread(db.update_app_settings, {'sync': {'last_local_change': sync_ts}})
+        except Exception:
+            pass
 
         return {'downloaded': downloaded, 'failed': failed, 'imported_db': imported_db, 'remote_marker': remote_ts}
 

@@ -30,6 +30,15 @@ class CoinRepository {
     return _db;
   }
 
+  /// Checkpoint WAL journal to flush all in-memory data to the main DB file.
+  /// Must be called before uploading coinscape.db to ensure the file has latest data.
+  Future<void> checkpointWal() async {
+    if (_db == null) return;
+    try {
+      await _db.customStatement('PRAGMA wal_checkpoint(TRUNCATE)');
+    } catch (_) {}
+  }
+
   // ==========================================
   // Series (系列) 相关操作
   // ==========================================

@@ -1131,16 +1131,24 @@ Future<void> _pullFromCloud() async {
     final repo = ref.read(coinRepositoryProvider);
 
     // Normalize keys: backend may send snake_case, Drift expects camelCase.
-    // Also convert ISO date strings to DateTime.
-    Map<String, dynamic> _normalizeKeys(Map<String, dynamic> json) {
+    // Date values may be: ISO strings, integer ms-since-epoch, or Dart extended format (+YYYYY-...).
+    Map<String, dynamic> normalizeKeys(Map<String, dynamic> json) {
       final out = <String, dynamic>{};
       json.forEach((key, value) {
         final camel = key.contains('_') ? key.replaceAllMapped(
           RegExp(r'_([a-z])'),
           (m) => m.group(1)!.toUpperCase(),
         ) : key;
-        if (value is String && RegExp(r'^\d{4}-\d{2}-\d{2}T').hasMatch(value)) {
-          try { out[camel] = DateTime.parse(value); } catch (_) { out[camel] = value; }
+        if (value is int && value > 946684800000) {
+          try { out[camel] = DateTime.fromMillisecondsSinceEpoch(value); } catch (_) { out[camel] = value; }
+        } else if (value is String) {
+          if (RegExp(r'^\d{4}-\d{2}-\d{2}').hasMatch(value)) {
+            try { out[camel] = DateTime.parse(value); } catch (_) { out[camel] = value; }
+          } else if (value.startsWith('+')) {
+            try { out[camel] = DateTime.parse(value.substring(1)); } catch (_) { out[camel] = value; }
+          } else {
+            out[camel] = value;
+          }
         } else {
           out[camel] = value;
         }
@@ -1148,11 +1156,11 @@ Future<void> _pullFromCloud() async {
       return out;
     }
 
-    final incomingSeries = data.series.map((e) => SeriesData.fromJson(_normalizeKeys(e as Map<String, dynamic>))).toList();
-    final incomingCoins = data.coins.map((e) => Coin.fromJson(_normalizeKeys(e as Map<String, dynamic>))).toList();
-    final incomingLinks = data.links.map((e) => CoinSeriesLinkData.fromJson(_normalizeKeys(e as Map<String, dynamic>))).toList();
-    final incomingCoinImages = data.coinImages.map((e) => CoinImage.fromJson(_normalizeKeys(e as Map<String, dynamic>))).toList();
-    final incomingSeriesImages = data.seriesImages.map((e) => SeriesImage.fromJson(_normalizeKeys(e as Map<String, dynamic>))).toList();
+    final incomingSeries = data.series.map((e) => SeriesData.fromJson(normalizeKeys(e as Map<String, dynamic>))).toList();
+    final incomingCoins = data.coins.map((e) => Coin.fromJson(normalizeKeys(e as Map<String, dynamic>))).toList();
+    final incomingLinks = data.links.map((e) => CoinSeriesLinkData.fromJson(normalizeKeys(e as Map<String, dynamic>))).toList();
+    final incomingCoinImages = data.coinImages.map((e) => CoinImage.fromJson(normalizeKeys(e as Map<String, dynamic>))).toList();
+    final incomingSeriesImages = data.seriesImages.map((e) => SeriesImage.fromJson(normalizeKeys(e as Map<String, dynamic>))).toList();
 
     final existingSeries = await repo.getAllSeries();
     final existingSeriesIds = existingSeries.map((e) => e.id).toSet();
