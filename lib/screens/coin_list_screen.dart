@@ -1130,11 +1130,29 @@ Future<void> _pullFromCloud() async {
   Future<void> _mergeCloudData(SyncData data) async {
     final repo = ref.read(coinRepositoryProvider);
 
-    final incomingSeries = data.series.map((e) => SeriesData.fromJson(e)).toList();
-    final incomingCoins = data.coins.map((e) => Coin.fromJson(e)).toList();
-    final incomingLinks = data.links.map((e) => CoinSeriesLinkData.fromJson(e)).toList();
-    final incomingCoinImages = data.coinImages.map((e) => CoinImage.fromJson(e)).toList();
-    final incomingSeriesImages = data.seriesImages.map((e) => SeriesImage.fromJson(e)).toList();
+    // Normalize keys: backend may send snake_case, Drift expects camelCase.
+    // Also convert ISO date strings to DateTime.
+    Map<String, dynamic> _normalizeKeys(Map<String, dynamic> json) {
+      final out = <String, dynamic>{};
+      json.forEach((key, value) {
+        final camel = key.contains('_') ? key.replaceAllMapped(
+          RegExp(r'_([a-z])'),
+          (m) => m.group(1)!.toUpperCase(),
+        ) : key;
+        if (value is String && RegExp(r'^\d{4}-\d{2}-\d{2}T').hasMatch(value)) {
+          try { out[camel] = DateTime.parse(value); } catch (_) { out[camel] = value; }
+        } else {
+          out[camel] = value;
+        }
+      });
+      return out;
+    }
+
+    final incomingSeries = data.series.map((e) => SeriesData.fromJson(_normalizeKeys(e as Map<String, dynamic>))).toList();
+    final incomingCoins = data.coins.map((e) => Coin.fromJson(_normalizeKeys(e as Map<String, dynamic>))).toList();
+    final incomingLinks = data.links.map((e) => CoinSeriesLinkData.fromJson(_normalizeKeys(e as Map<String, dynamic>))).toList();
+    final incomingCoinImages = data.coinImages.map((e) => CoinImage.fromJson(_normalizeKeys(e as Map<String, dynamic>))).toList();
+    final incomingSeriesImages = data.seriesImages.map((e) => SeriesImage.fromJson(_normalizeKeys(e as Map<String, dynamic>))).toList();
 
     final existingSeries = await repo.getAllSeries();
     final existingSeriesIds = existingSeries.map((e) => e.id).toSet();

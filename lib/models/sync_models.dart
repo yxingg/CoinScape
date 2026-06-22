@@ -15,9 +15,9 @@ class SyncData {
 
   factory SyncData.fromJson(Map<String, dynamic> json) {
     return SyncData(
-      series: json['series'] as List<dynamic>,
-      coins: json['coins'] as List<dynamic>,
-      links: json['links'] as List<dynamic>,
+      series: (json['series'] as List<dynamic>?) ?? const [],
+      coins: (json['coins'] as List<dynamic>?) ?? const [],
+      links: (json['links'] as List<dynamic>?) ?? const [],
       coinImages: (json['coinImages'] as List<dynamic>?) ?? const [],
       seriesImages: (json['seriesImages'] as List<dynamic>?) ?? const [],
     );

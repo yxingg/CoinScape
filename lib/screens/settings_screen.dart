@@ -166,13 +166,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     try {
       final wcfg = ref.read(webDavConfigProvider);
       if (wcfg.url.isNotEmpty) {
-        final cfg = {
-          'url': wcfg.url,
-          'username': wcfg.user,
-          'password': wcfg.password,
-          'remote_path': ''
-        };
-        lastCloud = await FileSyncManager.instance.readRemoteBackupMarker(cfg);
+        lastCloud = await FileSyncManager.instance.readRemoteBackupMarker(wcfg.toSyncCfg());
       }
     } catch (_) {}
 
@@ -547,6 +541,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         _stopStatusPolling();
         // refresh latest-change info after push
         await _loadLatestChangeInfo();
+      } else if (kIsWeb) {
+        AppLogger.error(logPrefixSettings, 'Web 端需要后端服务，但后端不可达');
+        if (mounted) DialogHelper.showErrorSnackBar(context, '后端服务不可达，请检查后端是否启动');
       } else {
         // fallback to local file-level incremental sync
         final wcfg = ref.read(webDavConfigProvider);
@@ -555,14 +552,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           return;
         }
         _startStatusPolling();
-        final cfg = {
-          'url': wcfg.url,
-          'username': wcfg.user,
-          'password': wcfg.password,
-          'remote_path': ''
-        };
         try {
-          final res = await FileSyncManager.instance.pushAll(cfg);
+          final res = await FileSyncManager.instance.pushAll(wcfg.toSyncCfg());
           AppLogger.info(logPrefixSettings, 'pushAll result: $res');
           final scan = res['scan'] as Map<String, dynamic>? ?? {};
           final proc = res['process'] as Map<String, dynamic>? ?? {};
@@ -605,28 +596,59 @@ AppLogger.warning(logPrefixSettings, 'WebDAV 未配置');
         // Use server-side file-level pull, then fetch exported JSON and merge locally
         final res = await ApiService.startFileSyncPull();
         if (res['success'] == true) {
+          final result = res['result'] as Map<String, dynamic>? ?? {};
+          final downloaded = result['downloaded'] as int? ?? 0;
+          final importedDb = result['imported_db'] == true;
+          AppLogger.info(logPrefixSettings, '服务器文件拉取完成: downloaded=$downloaded, imported_db=$importedDb');
+
+          // If backend didn't import during pull, try scanning local files
+          if (!importedDb) {
+            try {
+              final importResult = await ApiService.importLocalDb();
+              if (importResult['success'] == true) {
+                AppLogger.info(logPrefixSettings, '本地DB扫描导入成功: source=${importResult['source']}');
+              }
+            } catch (importErr) {
+              AppLogger.warning(logPrefixSettings, '本地DB扫描导入失败: $importErr');
+            }
+          }
+
           // fetch exported JSON from backend and merge into local DB
-          final exported = await ApiService.exportAllData();
-          final syncDataImported = SyncData.fromJson(exported);
-          AppLogger.info(logPrefixSettings, '服务器拉取完成, 开始合并数据...');
-          await _mergeData(syncDataImported);
-          if (!mounted) return;
-          AppLogger.info(logPrefixSettings, '拉取下载並合并成功');
-          DialogHelper.showSuccessSnackBar(context, '拉取(下载)并合并成功！');
+          try {
+            final exported = await ApiService.exportAllData();
+            final syncDataImported = SyncData.fromJson(exported);
+            if (syncDataImported.series.isEmpty && syncDataImported.coins.isEmpty) {
+              AppLogger.info(logPrefixSettings, '拉取完成但后端无数据可合并 (downloaded=$downloaded)');
+              if (mounted) {
+                if (downloaded > 0) {
+                  DialogHelper.showSuccessSnackBar(context, '已下载 $downloaded 个文件，但无数据库可合并');
+                } else {
+                  DialogHelper.showWarningSnackBar(context, '云端无新文件可拉取');
+                }
+              }
+            } else {
+              AppLogger.info(logPrefixSettings, '开始合并数据: series=${syncDataImported.series.length}, coins=${syncDataImported.coins.length}');
+              await _mergeData(syncDataImported);
+              if (!mounted) return;
+              AppLogger.info(logPrefixSettings, '拉取下载并合并成功');
+              DialogHelper.showSuccessSnackBar(context, '拉取(下载)并合并成功！');
+            }
+          } catch (parseError, parseSt) {
+            AppLogger.error(logPrefixSettings, '数据解析或合并失败: $parseError', parseSt);
+            if (mounted) DialogHelper.showErrorSnackBar(context, '数据合并失败: $parseError');
+          }
         } else {
           if (mounted) DialogHelper.showErrorSnackBar(context, '后端拉取失败');
         }
+      } else if (kIsWeb) {
+        // On web, backend is required — cannot fall through to native path
+        AppLogger.error(logPrefixSettings, 'Web 端需要后端服务，但后端不可达 (baseUrl=${ApiService.baseUrl})');
+        if (mounted) DialogHelper.showErrorSnackBar(context, '后端服务不可达，请检查后端是否启动 (${ApiService.baseUrl})');
       } else {
         // fallback to client-side file-level pull (incremental)
         try {
           final wcfg = ref.read(webDavConfigProvider);
-          final cfg = {
-            'url': wcfg.url,
-            'username': wcfg.user,
-            'password': wcfg.password,
-            'remote_path': ''
-          };
-          final res = await FileSyncManager.instance.pullAll(cfg);
+          final res = await FileSyncManager.instance.pullAll(wcfg.toSyncCfg());
           AppLogger.info(logPrefixSettings, '本地文件级拉取结果: $res');
           final downloaded = res['downloaded'] as int? ?? 0;
           final failed = res['failed'] as int? ?? 0;
@@ -668,15 +690,9 @@ AppLogger.warning(logPrefixSettings, 'WebDAV 未配置');
         }
       }
     } catch (e, st) {
-      // 显示更详细的错误信息
       final errorStr = e.toString();
-      final fullError = '下载失败: $errorStr\n类型: ${e.runtimeType}\n栈追踪: $st';
-      AppLogger.error(logPrefixSettings, fullError, st);
-AppLogger.error(logPrefixSettings, '下载失败 - $errorStr');
-
+      AppLogger.error(logPrefixSettings, '下载失败 - $errorStr', st);
       AppLogger.error(logPrefixSettings, '下载失败类型: ${e.runtimeType}');
-
-      AppLogger.error(logPrefixSettings, '堆栈跟踪: $st');
       if (mounted) {
         DialogHelper.showErrorSnackBar(context, '云端备份下载失败: $errorStr');
       }
@@ -734,12 +750,36 @@ AppLogger.error(logPrefixSettings, '下载失败 - $errorStr');
   Future<void> _mergeData(SyncData data) async {
     final repo = ref.read(coinRepositoryProvider);
 
+    // Backend exports snake_case keys (from SQLite), but Drift fromJson expects camelCase.
+    // Also backend sends ISO date strings, Drift expects DateTime objects.
+    Map<String, dynamic> _normalizeKeys(Map<String, dynamic> json) {
+      final out = <String, dynamic>{};
+      json.forEach((key, value) {
+        // snake_case → camelCase
+        final camel = key.contains('_') ? key.replaceAllMapped(
+          RegExp(r'_([a-z])'),
+          (m) => m.group(1)!.toUpperCase(),
+        ) : key;
+        // ISO string dates → DateTime
+        if (value is String && RegExp(r'^\d{4}-\d{2}-\d{2}T').hasMatch(value)) {
+          try {
+            out[camel] = DateTime.parse(value);
+          } catch (_) {
+            out[camel] = value;
+          }
+        } else {
+          out[camel] = value;
+        }
+      });
+      return out;
+    }
+
     // 解析云端数据 
-    final incomingSeries = data.series.map((e) => SeriesData.fromJson(e as Map<String, dynamic>)).toList();
-    final incomingCoins = data.coins.map((e) => Coin.fromJson(e as Map<String, dynamic>)).toList();
-    final incomingLinks = data.links.map((e) => CoinSeriesLinkData.fromJson(e as Map<String, dynamic>)).toList();
-    final incomingCoinImages = data.coinImages.map((e) => CoinImage.fromJson(e as Map<String, dynamic>)).toList();
-    final incomingSeriesImages = data.seriesImages.map((e) => SeriesImage.fromJson(e as Map<String, dynamic>)).toList();
+    final incomingSeries = data.series.map((e) => SeriesData.fromJson(_normalizeKeys(e as Map<String, dynamic>))).toList();
+    final incomingCoins = data.coins.map((e) => Coin.fromJson(_normalizeKeys(e as Map<String, dynamic>))).toList();
+    final incomingLinks = data.links.map((e) => CoinSeriesLinkData.fromJson(_normalizeKeys(e as Map<String, dynamic>))).toList();
+    final incomingCoinImages = data.coinImages.map((e) => CoinImage.fromJson(_normalizeKeys(e as Map<String, dynamic>))).toList();
+    final incomingSeriesImages = data.seriesImages.map((e) => SeriesImage.fromJson(_normalizeKeys(e as Map<String, dynamic>))).toList();
 
     // 筛选冲突
     final existingSeries = await repo.getAllSeries();

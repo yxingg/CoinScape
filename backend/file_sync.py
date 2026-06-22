@@ -6,6 +6,7 @@ import uuid
 import logging
 import threading
 import asyncio
+import zipfile
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 from urllib.parse import urlparse, urlunparse, quote, unquote
@@ -137,14 +138,31 @@ class FileSyncManager:
         seen = set()
 
         for root, dirs, files in os.walk(self.save_path):
+            # Skip staging/temp directories entirely
+            dirs[:] = [d for d in dirs if d not in ('.imported_dbs', '.thumb_cache', 'uploads')]
             for fn in files:
-                # skip our own sync DB and the coinscape log
                 rel = os.path.relpath(os.path.join(root, fn), self.save_path).replace('\\', '/')
-                if rel == DB_FILENAME:
-                    logger.debug('Skipping internal DB file: %s', rel)
+                
+                # Skip internal sync DB and journals
+                if rel == DB_FILENAME or fn in ('file_sync.db-wal', 'file_sync.db-shm'):
                     continue
-                if rel.endswith('coinscape.log') or fn == 'coinscape.log':
-                    logger.debug('Skipping log file: %s', rel)
+                
+                # Skip log files and rotated backups
+                if fn == 'coinscape.log' or fn.startswith('coinscape.log.'):
+                    continue
+                
+                # Skip config files (contain credentials)
+                if fn in ('app_config.json', 'app_settings.json'):
+                    continue
+                
+                # Skip temp/staging files
+                if fn.endswith('.tmp') or fn.endswith('.tmp.tmp'):
+                    continue
+                if fn.endswith('-wal') or fn.endswith('-shm'):
+                    continue
+                
+                # Skip .ccm backup archives (transient staging)
+                if fn.endswith('.ccm'):
                     continue
 
                 full = os.path.join(root, fn)
@@ -516,6 +534,36 @@ class FileSyncManager:
         except Exception:
             return {}
 
+    def _extract_data_from_ccm(self, path: str) -> Dict[str, Any]:
+        """Extract data from a .ccm ZIP backup (contains db.json + images/*).
+        Returns importable dict or empty dict on failure.
+        Also extracts images to the images directory.
+        """
+        try:
+            with zipfile.ZipFile(path, 'r') as zf:
+                names = zf.namelist()
+                # Extract db.json
+                data = {}
+                if 'db.json' in names:
+                    raw = zf.read('db.json')
+                    data = json.loads(raw.decode('utf-8'))
+                
+                # Extract images to images directory
+                images_dir = os.path.join(self.save_path, 'images')
+                os.makedirs(images_dir, exist_ok=True)
+                for name in names:
+                    if name.startswith('images/') and not name.endswith('/'):
+                        img_data = zf.read(name)
+                        img_filename = os.path.basename(name)
+                        img_path = os.path.join(images_dir, img_filename)
+                        with open(img_path, 'wb') as f:
+                            f.write(img_data)
+                
+                return data
+        except Exception as e:
+            logger.warning('_extract_data_from_ccm failed for %s: %s', path, e)
+            return {}
+
     async def pull_all(self) -> Dict[str, Any]:
         """Download files from remote WebDAV into local save_path (file-level pull + DB import when DB found).
         Returns summary.
@@ -602,6 +650,13 @@ class FileSyncManager:
                         fh.write(get_resp.content)
                     os.replace(target_local + '.tmp', target_local)
                 except Exception as e:
+                    # Clean up orphaned .tmp file
+                    try:
+                        tmp_path = target_local + '.tmp'
+                        if os.path.exists(tmp_path):
+                            os.remove(tmp_path)
+                    except Exception:
+                        pass
                     await asyncio.to_thread(self._db_mark_queue_failed, -1, f'pull_write_error:{rel}:{e}')
                     failed += 1
                     continue
@@ -613,16 +668,40 @@ class FileSyncManager:
                 downloaded += 1
 
                 # if this is the sqlite DB file, extract and import
-                if rel == 'db/coinscape.db':
+                if rel in ('db/coinscape.db', 'coinscape.db'):
                     try:
                         temp_db_path = target_local
                         data = await asyncio.to_thread(self._extract_data_from_sqlite_file, temp_db_path)
                         if data:
                             await asyncio.to_thread(db.import_all_data, data)
                             imported_db = True
+                            # Clean up staging copy (not the working DB)
+                            if rel != 'db/coinscape.db':
+                                try:
+                                    os.remove(target_local)
+                                    logger.info('Cleaned up staging file: %s', rel)
+                                except Exception:
+                                    pass
                     except Exception as e:
                         await asyncio.to_thread(self._db_mark_queue_failed, -1, f'db_import_error:{e}')
                         failed += 1
+
+                # if this is a .ccm backup (ZIP), extract db.json and import
+                if rel.endswith('.ccm') and not imported_db:
+                    try:
+                        data = await asyncio.to_thread(self._extract_data_from_ccm, target_local)
+                        if data:
+                            await asyncio.to_thread(db.import_all_data, data)
+                            imported_db = True
+                            logger.info('Imported data from .ccm backup: %s', rel)
+                            # Clean up .ccm staging file
+                            try:
+                                os.remove(target_local)
+                                logger.info('Cleaned up .ccm file: %s', rel)
+                            except Exception:
+                                pass
+                    except Exception as e:
+                        logger.warning('Failed to import .ccm backup %s: %s', rel, e)
 
         # After all files processed, update local last_local_change to remote marker timestamp if available
         if remote_ts:
@@ -630,6 +709,50 @@ class FileSyncManager:
                 await asyncio.to_thread(db.update_app_settings, {'sync': {'last_local_change': remote_ts}})
             except Exception:
                 pass
+
+        # Fallback: if no DB was imported during download, check if a local coinscape.db exists
+        # (may have been downloaded in a previous pull or placed manually) and import it.
+        if not imported_db:
+            for candidate_rel in ('db/coinscape.db', 'coinscape.db'):
+                candidate_path = os.path.join(self.save_path, candidate_rel.replace('/', os.sep))
+                if os.path.isfile(candidate_path):
+                    try:
+                        data = await asyncio.to_thread(self._extract_data_from_sqlite_file, candidate_path)
+                        if data and (data.get('series') or data.get('coins')):
+                            await asyncio.to_thread(db.import_all_data, data)
+                            imported_db = True
+                            logger.info('Fallback: imported existing DB from %s', candidate_rel)
+                            # Clean up: delete the staging copy if it's not the working DB
+                            if candidate_rel != 'db/coinscape.db':
+                                try:
+                                    os.remove(candidate_path)
+                                    logger.info('Cleaned up staging file: %s', candidate_rel)
+                                except Exception:
+                                    pass
+                            break
+                    except Exception as e:
+                        logger.warning('Fallback DB import failed for %s: %s', candidate_rel, e)
+
+        # Fallback: check for .ccm files
+        if not imported_db:
+            try:
+                for fname in os.listdir(self.save_path):
+                    if fname.endswith('.ccm'):
+                        ccm_path = os.path.join(self.save_path, fname)
+                        data = await asyncio.to_thread(self._extract_data_from_ccm, ccm_path)
+                        if data and (data.get('series') or data.get('coins')):
+                            await asyncio.to_thread(db.import_all_data, data)
+                            imported_db = True
+                            logger.info('Fallback: imported from .ccm backup %s', fname)
+                            # Clean up the .ccm staging file
+                            try:
+                                os.remove(ccm_path)
+                                logger.info('Cleaned up .ccm file: %s', fname)
+                            except Exception:
+                                pass
+                            break
+            except Exception as e:
+                logger.warning('Fallback .ccm scan failed: %s', e)
 
         return {'downloaded': downloaded, 'failed': failed, 'imported_db': imported_db, 'remote_marker': remote_ts}
 
@@ -767,7 +890,7 @@ class FileSyncManager:
             await asyncio.to_thread(self._db_update_file_index_after_upload, rel_path, now, target_url, etag)
 
             imported_db = False
-            if rel_path == 'db/coinscape.db':
+            if rel_path in ('db/coinscape.db', 'coinscape.db'):
                 try:
                     data = await asyncio.to_thread(self._extract_data_from_sqlite_file, target_local)
                     if data:

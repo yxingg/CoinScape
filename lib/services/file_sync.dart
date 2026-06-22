@@ -84,8 +84,30 @@ class FileSyncManager {
     await for (final ent in root.list(recursive: true, followLinks: false)) {
       if (ent is! File) continue;
       final rel = p.relative(ent.path, from: _baseDir).replaceAll('\\', '/');
+      final basename = p.basename(ent.path);
+      
+      // Skip internal sync DB and journals
       if (rel == 'file_sync.db' || rel.endsWith('/file_sync.db')) continue;
-      if (rel.endsWith('coinscape.log') || p.basename(ent.path) == 'coinscape.log') continue;
+      if (basename == 'file_sync.db-wal' || basename == 'file_sync.db-shm') continue;
+      
+      // Skip log files and rotated backups
+      if (basename == 'coinscape.log' || basename.startsWith('coinscape.log.')) continue;
+      
+      // Skip config files
+      if (rel == 'app_config.json' || rel.endsWith('/app_config.json')) continue;
+      if (rel == 'app_settings.json' || rel.endsWith('/app_settings.json')) continue;
+      
+      // Skip staging/temp directories
+      if (rel.startsWith('.imported_dbs/') || rel.contains('/.imported_dbs/')) continue;
+      if (rel.startsWith('.thumb_cache/') || rel.contains('/.thumb_cache/')) continue;
+      if (rel.startsWith('uploads/') || rel.contains('/uploads/')) continue;
+      
+      // Skip temp files and SQLite journals
+      if (basename.endsWith('.tmp') || basename.endsWith('.tmp.tmp')) continue;
+      if (basename.endsWith('-wal') || basename.endsWith('-shm')) continue;
+      
+      // Skip .ccm backup archives (transient staging)
+      if (basename.endsWith('.ccm')) continue;
 
       fileCount++;
 
@@ -829,9 +851,13 @@ class FileSyncManager {
             await _db!.upsertIndex(pathStr: rel, sha256: existing?.sha256 ?? '', size: existing?.size ?? 0, mtime: existing?.mtime ?? 0.0, lastSeenAt: existing?.lastSeenAt ?? DateTime.now().toIso8601String(), lastSyncedAt: DateTime.now().toIso8601String(), remotePath: href, remoteEtag: getResp.headers['etag'] ?? getResp.headers['ETag']);
           } else {
             failed += 1;
+            // Clean up orphaned .tmp file
+            try { await File('$actualTargetLocal.tmp').delete(); } catch (_) {}
           }
         } catch (e) {
           failed += 1;
+          // Clean up orphaned .tmp file
+          try { await File('$actualTargetLocal.tmp').delete(); } catch (_) {}
         }
       }
 

@@ -56,12 +56,7 @@ class _SyncPreviewScreenState extends ConsumerState<SyncPreviewScreen> {
 
       // Native fallback: reuse local file sync preview if available
       final fs = FileSyncManager.instance;
-      final cfg = {
-        'url': webdavCfg.url,
-        'username': webdavCfg.user,
-        'password': webdavCfg.password,
-        'remote_path': ''
-      };
+      final cfg = webdavCfg.toSyncCfg();
       final detailed = await fs.getDetailedStatus(webdavCfg: cfg);
       AppLogger.info('[SYNC]', 'getDetailedStatus result: keys=${detailed.keys.toList()}');
       AppLogger.info('[SYNC]', '  counts=${detailed["counts"]}');
@@ -143,12 +138,7 @@ class _SyncPreviewScreenState extends ConsumerState<SyncPreviewScreen> {
       // Native fallback: use local FileSyncManager to pull a single file and
       // refresh the preview. This allows preview-screen pulls on Android/iOS.
       final fs = FileSyncManager.instance;
-      final cfg = {
-        'url': webdavCfg.url,
-        'username': webdavCfg.user,
-        'password': webdavCfg.password,
-        'remote_path': ''
-      };
+      final cfg = webdavCfg.toSyncCfg();
       final resp = await fs.pullOne(path, cfg);
       final result = resp['result'] as Map<String, dynamic>?;
       final ok = result != null && result['success'] == true;

@@ -3,7 +3,6 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../services/api_service.dart';
-import '../services/local_config_service.dart';
 import '../utils/logger.dart';
 
 class AppSettings {
@@ -23,6 +22,7 @@ class AppSettings {
   final String webDavUser;
   final String webDavPassword;
   final bool webDavProxyEnabled;
+  final String webDavRemotePath;
 
   AppSettings({
     this.displayFontId = 'default',
@@ -41,6 +41,7 @@ class AppSettings {
     this.webDavUser = '',
     this.webDavPassword = '',
     this.webDavProxyEnabled = true,
+    this.webDavRemotePath = '',
   });
 
   AppSettings copyWith({
@@ -60,6 +61,7 @@ class AppSettings {
     String? webDavUser,
     String? webDavPassword,
     bool? webDavProxyEnabled,
+    String? webDavRemotePath,
   }) {
     return AppSettings(
       displayFontId: displayFontId ?? this.displayFontId,
@@ -78,6 +80,7 @@ class AppSettings {
       webDavUser: webDavUser ?? this.webDavUser,
       webDavPassword: webDavPassword ?? this.webDavPassword,
       webDavProxyEnabled: webDavProxyEnabled ?? this.webDavProxyEnabled,
+      webDavRemotePath: webDavRemotePath ?? this.webDavRemotePath,
     );
   }
 
@@ -99,6 +102,7 @@ class AppSettings {
       'webDavUser': webDavUser,
       'webDavPassword': _encryptPassword(webDavPassword),
       'webDavProxyEnabled': webDavProxyEnabled,
+      'webDavRemotePath': webDavRemotePath,
     };
   }
 
@@ -120,6 +124,7 @@ class AppSettings {
       webDavUser: json['webDavUser'] as String? ?? '',
       webDavPassword: _decryptPassword(json['webDavPassword'] as String? ?? ''),
       webDavProxyEnabled: json['webDavProxyEnabled'] as bool? ?? true,
+      webDavRemotePath: json['webDavRemotePath'] as String? ?? '',
     );
   }
 
@@ -167,7 +172,7 @@ class AppSettings {
           'username': webDavUser,
           // only include password when it's non-empty to avoid overwriting existing secret
           if (webDavPassword.isNotEmpty) 'password': webDavPassword,
-          'remote_path': ''
+          'remote_path': webDavRemotePath
         }
       }
     };
@@ -200,7 +205,7 @@ class AppSettings {
       // treat it as "set but hidden" and leave the UI password empty.
       webDavPassword: (webdav['password'] as String? ?? '').startsWith('enc:') ? '' : (webdav['password'] as String? ?? ''),
       webDavProxyEnabled: webdav['enabled'] as bool? ?? false,
-      // store merge policy locally in webdav password field? No; we will handle separately via SettingsNotifier update
+      webDavRemotePath: webdav['remote_path'] as String? ?? '',
     );
   }
 }
@@ -212,13 +217,6 @@ class SettingsNotifier extends StateNotifier<AppSettings> {
 
   Future<void> _loadSettings() async {
     try {
-      final localData = await LocalConfigService.load();
-      if (localData.isNotEmpty) {
-        state = AppSettings.fromJson(localData);
-        AppLogger.info('Settings', '已从本地配置文件加载设置');
-        return;
-      }
-
       if (kIsWeb) {
         try {
           // Ensure any previously saved backend base URL is loaded before
@@ -254,8 +252,6 @@ class SettingsNotifier extends StateNotifier<AppSettings> {
               state = state.copyWith(displayFontId: fontId);
             }
           } catch (_) {}
-
-          await LocalConfigService.save(state.toJson());
         } catch (_) {
           _loadFromPrefs();
         }
@@ -291,11 +287,31 @@ class SettingsNotifier extends StateNotifier<AppSettings> {
   }
 
   Future<void> _save() async {
-    await LocalConfigService.save(state.toJson());
     if (kIsWeb) {
       try {
         await ApiService.updateAppSettings(state.toBackendJson());
       } catch (_) {}
+    } else {
+      // Save to SharedPreferences on native platforms
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('displayFontId', state.displayFontId);
+      await prefs.setString('pdfChineseFontId', state.pdfChineseFontId);
+      await prefs.setString('pdfEnglishFontId', state.pdfEnglishFontId);
+      await prefs.setDouble('fontSize', state.fontSize);
+      await prefs.setString('density', state.density);
+      await prefs.setString('theme', state.theme);
+      await prefs.setBool('imageViewMode', state.imageViewMode);
+      await prefs.setBool('autoSave', state.autoSave);
+      await prefs.setBool('confirmDeletions', state.confirmDeletions);
+      await prefs.setString('backendUrl', state.backendUrl);
+      await prefs.setString('savePath', state.savePath);
+      await prefs.setString('logLevel', state.logLevel);
+      await prefs.setString('webDavUrl', state.webDavUrl);
+      await prefs.setString('webDavUser', state.webDavUser);
+      if (state.webDavPassword.isNotEmpty) {
+        await prefs.setString('webDavPassword', state.webDavPassword);
+      }
+      await prefs.setBool('webDavProxyEnabled', state.webDavProxyEnabled);
     }
   }
 

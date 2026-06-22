@@ -364,6 +364,11 @@ class ApiService {
     await _post('/backup/import', data);
   }
 
+  /// Scan local data directory for coinscape.db and import
+  static Future<Map<String, dynamic>> importLocalDb() async {
+    return await _post('/backup/import_local_db', {});
+  }
+
   // ==========================================
   // File Sync (backend-driven)
   // ==========================================

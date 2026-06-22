@@ -866,6 +866,57 @@ async def import_data(data: dict = Body(...)):
     return {"success": True}
 
 
+@app.post("/api/backup/import_local_db")
+async def import_local_db():
+    """Scan local data directory for coinscape.db files and import the first valid one found."""
+    try:
+        settings = await asyncio.to_thread(db.load_app_settings)
+        save_path = settings.get('backend', {}).get('save_path') or db.SAVE_PATH
+        imported = False
+        source = ''
+        for candidate_rel in ('coinscape.db', 'db/coinscape.db'):
+            candidate_path = os.path.join(save_path, candidate_rel.replace('/', os.sep))
+            if os.path.isfile(candidate_path):
+                try:
+                    data = await asyncio.to_thread(file_sync.manager._extract_data_from_sqlite_file, candidate_path)
+                    if data and (data.get('series') or data.get('coins')):
+                        await asyncio.to_thread(db.import_all_data, data)
+                        imported = True
+                        source = candidate_rel
+                        # Clean up staging copy (not the working DB)
+                        if candidate_rel != 'db/coinscape.db':
+                            try:
+                                os.remove(candidate_path)
+                            except Exception:
+                                pass
+                        break
+                except Exception:
+                    continue
+        # Also check .ccm files
+        if not imported:
+            try:
+                for fname in os.listdir(save_path):
+                    if fname.endswith('.ccm'):
+                        ccm_path = os.path.join(save_path, fname)
+                        data = await asyncio.to_thread(file_sync.manager._extract_data_from_ccm, ccm_path)
+                        if data and (data.get('series') or data.get('coins')):
+                            await asyncio.to_thread(db.import_all_data, data)
+                            imported = True
+                            source = fname
+                            try:
+                                os.remove(ccm_path)
+                            except Exception:
+                                pass
+                            break
+            except Exception:
+                pass
+        return JSONResponse({"success": imported, "source": source})
+    except Exception as e:
+        logger = logging.getLogger("coinscape.backup")
+        logger.exception("import_local_db failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ============================================================
 # File sync (incremental images and data files) API
 # ============================================================
