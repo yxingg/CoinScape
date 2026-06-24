@@ -632,7 +632,15 @@ AppLogger.warning(logPrefixSettings, 'WebDAV 未配置');
               AppLogger.info(logPrefixSettings, '开始合并数据: series=${syncDataImported.series.length}, coins=${syncDataImported.coins.length}');
               await _mergeData(syncDataImported);
               if (!mounted) return;
-              AppLogger.info(logPrefixSettings, '拉取下载并合并成功');
+
+              // After merge, apply marker timestamp to last_local_change
+              try {
+                final markerResult = await ApiService.applyMarker();
+                if (markerResult['success'] == true) {
+                  AppLogger.info(logPrefixSettings, 'Marker applied: ${markerResult['timestamp']}');
+                }
+              } catch (_) {}
+
               DialogHelper.showSuccessSnackBar(context, '拉取(下载)并合并成功！');
             }
           } catch (parseError, parseSt) {
@@ -711,7 +719,7 @@ AppLogger.warning(logPrefixSettings, 'WebDAV 未配置');
       }
     } finally {
       if (mounted) setState(() => _isSyncing = false);
-        await _loadLatestChangeInfo();
+      await _loadLatestChangeInfo();
     }
   }
 
@@ -764,7 +772,7 @@ AppLogger.warning(logPrefixSettings, 'WebDAV 未配置');
     final repo = ref.read(coinRepositoryProvider);
 
     // Backend exports snake_case keys (from SQLite), but Drift fromJson expects camelCase.
-    // Date values may be: ISO strings, integer ms-since-epoch, or Dart extended format (+YYYYY-...).
+    // Date values may be: ISO strings, integer seconds/ms-since-epoch, or Dart extended format.
     // Drift fromJson expects DateTime objects for date fields.
     Map<String, dynamic> normalizeKeys(Map<String, dynamic> json) {
       final out = <String, dynamic>{};
@@ -775,12 +783,15 @@ AppLogger.warning(logPrefixSettings, 'WebDAV 未配置');
           (m) => m.group(1)!.toUpperCase(),
         ) : key;
         
-        // Convert date values to DateTime
-        if (value is int && value > 946684800000) {
-          // Likely milliseconds since epoch (after year 2000)
-          try {
-            out[camel] = DateTime.fromMillisecondsSinceEpoch(value);
-          } catch (_) {
+        // Convert integer timestamps to DateTime
+        if (value is int) {
+          if (value > 1e12) {
+            // Milliseconds since epoch
+            try { out[camel] = DateTime.fromMillisecondsSinceEpoch(value); } catch (_) { out[camel] = value; }
+          } else if (value > 1e9) {
+            // Seconds since epoch
+            try { out[camel] = DateTime.fromMillisecondsSinceEpoch(value * 1000); } catch (_) { out[camel] = value; }
+          } else {
             out[camel] = value;
           }
         } else if (value is String) {

@@ -8,6 +8,7 @@ Data is stored in SAVE_PATH directory on the local filesystem.
 import sqlite3
 import json
 import os
+import logging
 import copy
 try:
     from . import crypto
@@ -16,6 +17,8 @@ except Exception:
 import shutil
 from datetime import datetime
 from typing import Optional, Dict, Any
+
+logger = logging.getLogger('coinscape.db')
 
 # ============================================================
 # CONFIG: config.json support for save_path
@@ -538,15 +541,18 @@ def export_all_data() -> dict:
 
 def _normalize_date(value):
     """Convert any date value to ISO 8601 string for consistent storage.
-    Handles: int (ms since epoch), ISO strings, Dart DateTime format (+YYYYY-MM-DD...).
+    Handles: int/float (seconds or ms since epoch), ISO strings, Dart extended format.
     """
     if value is None:
         return None
     if isinstance(value, (int, float)):
-        # Milliseconds since epoch → ISO string
         try:
             from datetime import datetime, timezone
-            dt = datetime.fromtimestamp(value / 1000.0, tz=timezone.utc)
+            # Auto-detect unit: >1e12 = milliseconds, >1e9 = seconds
+            if value > 1e12:
+                dt = datetime.fromtimestamp(value / 1000.0, tz=timezone.utc)
+            else:
+                dt = datetime.fromtimestamp(value, tz=timezone.utc)
             return dt.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3]
         except (ValueError, OSError, TypeError):
             return str(value)
@@ -557,7 +563,6 @@ def _normalize_date(value):
         # Dart extended format: +YYYYY-MM-DD... → try to convert
         if value.startswith('+'):
             try:
-                # Python can parse extended year ISO format
                 dt = datetime.fromisoformat(value.replace('+', ''))
                 return dt.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3]
             except (ValueError, TypeError):
@@ -616,20 +621,27 @@ def import_all_data(data: dict):
         )
     
     # Import coin images
+    img_count = 0
     for img in data.get("coinImages", []):
         cursor.execute(
             "INSERT OR REPLACE INTO coin_images (id, coin_id, image_path, sort_order) VALUES (?, ?, ?, ?)",
             (img["id"], img["coin_id"], img["image_path"], img.get("sort_order", 0))
         )
+        img_count += 1
     
     # Import series images
     for img in data.get("seriesImages", []):
         cursor.execute(
             "INSERT OR REPLACE INTO series_images (id, series_id, image_path, sort_order) VALUES (?, ?, ?, ?)",
             (img["id"], img["series_id"], img["image_path"], img.get("sort_order", 0))
-)
+        )
     
     conn.commit()
+    
+    # Verify
+    verify = conn.execute("SELECT COUNT(*) FROM coin_images").fetchone()[0]
+    logger.info('import_all_data: attempted=%d, committed=%d coin_images', img_count, verify)
+    
     conn.close()
 
 
@@ -821,7 +833,7 @@ def load_app_settings() -> Dict[str, Any]:
 
             return settings
         except (json.JSONDecodeError, IOError) as e:
-            print(f"Error loading settings: {e}")
+            logger.error("Error loading settings: %s", e)
     
     # Return default settings
     return {

@@ -168,10 +168,8 @@ class SyncService {
   ) async {
     final c = client;
     AppLogger.info(logPrefixSync, '尝试连接到 WebDAV 服务器: $_finalUrl');
-    AppLogger.debug(logPrefixSync, '尝试连接到 WebDAV 服务器: $_finalUrl');
     
     try {
-      // 先尝试连接和验证
       AppLogger.debug(logPrefixSync, '验证 WebDAV 连接...');
       await c.readProps('/');
       AppLogger.info(logPrefixSync, 'WebDAV 连接验证成功');
@@ -240,10 +238,8 @@ class SyncService {
   Future<SyncData> pullBackup() async {
     final c = client;
     AppLogger.info(logPrefixSync, '尝试连接到 WebDAV 服务器: $_finalUrl');
-    AppLogger.debug(logPrefixSync, '尝试连接到 WebDAV 服务器: $_finalUrl');
     
     try {
-      // 先尝试连接和验证
       AppLogger.debug(logPrefixSync, '验证 WebDAV 连接...');
       await c.readProps('/');
       AppLogger.info(logPrefixSync, 'WebDAV 连接验证成功');

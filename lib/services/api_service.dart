@@ -369,6 +369,11 @@ class ApiService {
     return await _post('/backup/import_local_db', {});
   }
 
+  /// Read marker temp file, set last_local_change, delete file. Call AFTER merge.
+  static Future<Map<String, dynamic>> applyMarker() async {
+    return await _post('/sync/apply_marker', {});
+  }
+
   // ==========================================
   // File Sync (backend-driven)
   // ==========================================

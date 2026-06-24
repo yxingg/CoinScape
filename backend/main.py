@@ -123,7 +123,7 @@ def setup_logging() -> None:
         file_handler.setFormatter(formatter)
     except Exception as e:
         # 如果文件日志失败，只使用控制台
-        print(f"无法初始化文件日志: {e}")
+        logging.getLogger("coinscape").warning("无法初始化文件日志: %s", e)
         file_handler = None
 
     # 控制台处理器
@@ -732,15 +732,20 @@ async def get_settings():
                                 text = (resp.text or '').strip()
                                 if text:
                                     last_cloud = text
+                        else:
+                            logging.getLogger('coinscape.sync').warning('Marker fetch returned status %d', resp.status_code)
                 except Exception:
                     logging.getLogger('coinscape.sync').exception('Failed to fetch remote backup marker')
-
-        except Exception:
-            last_cloud = None
+        except Exception as e:
+            logging.getLogger('coinscape.sync').warning('Marker read outer error: %s', e)
 
         def _parse_iso(s: str):
             try:
-                return datetime.fromisoformat(s) if s else None
+                if not s:
+                    return None
+                dt = datetime.fromisoformat(s)
+                # Strip timezone to allow comparison between naive and aware datetimes
+                return dt.replace(tzinfo=None)
             except Exception:
                 return None
 
@@ -986,6 +991,44 @@ async def api_pull_files(data: dict = Body(None)):
     except Exception as e:
         logger = logging.getLogger("coinscape.file_sync.api")
         logger.exception("pull failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/sync/apply_marker")
+async def api_apply_marker():
+    """Read the local marker temp file, set last_local_change, then delete the file.
+    Call this AFTER merge completes to ensure last_local_change is not overwritten.
+    """
+    try:
+        settings = await asyncio.to_thread(db.load_app_settings)
+        save_path = settings.get('backend', {}).get('save_path') or db.SAVE_PATH
+        marker_path = os.path.join(save_path, '.last_cloud_backup.json')
+        if not os.path.isfile(marker_path):
+            return JSONResponse({"success": False, "error": "marker file not found"})
+        with open(marker_path, 'r', encoding='utf-8') as f:
+            content = f.read().strip()
+        timestamp = None
+        if content:
+            try:
+                j = json.loads(content)
+                if isinstance(j, dict) and 'timestamp' in j:
+                    timestamp = j['timestamp']
+                else:
+                    timestamp = content
+            except Exception:
+                timestamp = content
+        # Delete temp file
+        try:
+            os.remove(marker_path)
+        except Exception:
+            pass
+        # Set last_local_change
+        if timestamp:
+            await asyncio.to_thread(db.update_app_settings, {'sync': {'last_local_change': timestamp}})
+            return JSONResponse({"success": True, "timestamp": timestamp})
+        return JSONResponse({"success": False, "error": "no timestamp in marker"})
+    except Exception as e:
+        logging.getLogger("coinscape.sync").exception("apply_marker failed")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -1448,8 +1491,8 @@ if os.path.isdir(_web_build_dir):
             return FileResponse(index_path, headers={"Cache-Control": "no-cache, must-revalidate"})
         return JSONResponse({"error": "Web build not found. Run 'flutter build web --web-renderer canvaskit' first."})
 else:
-    print(f"WARNING: Web build directory not found at {_web_build_dir}")
-    print("Please run 'flutter build web --web-renderer canvaskit' first.")
+    logger.warning("Web build directory not found at %s", _web_build_dir)
+    logger.warning("Please run 'flutter build web --web-renderer canvaskit' first.")
 
 
 # ============================================================
@@ -1459,13 +1502,13 @@ else:
 @app.on_event("startup")
 async def startup():
     db.init_db()
-    print(f"CoinScape Backend started")
-    print(f"  Data directory: {db.SAVE_PATH}")
-    print(f"  Database: {db.DB_PATH}")
-    print(f"  Images: {db.IMAGES_DIR}")
-    print(f"  Fonts: {db.FONTS_DIR}")
+    logger.info("CoinScape Backend started")
+    logger.info("  Data directory: %s", db.SAVE_PATH)
+    logger.info("  Database: %s", db.DB_PATH)
+    logger.info("  Images: %s", db.IMAGES_DIR)
+    logger.info("  Fonts: %s", db.FONTS_DIR)
     if os.path.isdir(_web_build_dir):
-        print(f"  Web static: {_web_build_dir}")
+        logger.info("  Web static: %s", _web_build_dir)
     try:
         settings = db.load_app_settings()
         backend_cfg = settings.get("backend", {})
@@ -1473,11 +1516,11 @@ async def startup():
         lvl = backend_cfg.get("log_level")
         proxy_enabled = backend_cfg.get("proxy_enabled")
         if svc:
-            print(f"  Backend service address: {svc}")
+            logger.info("  Backend service address: %s", svc)
         if lvl:
-            print(f"  Backend log level: {lvl}")
+            logger.info("  Backend log level: %s", lvl)
         if proxy_enabled is not None:
-            print(f"  Backend proxy enabled: {proxy_enabled}")
+            logger.info("  Backend proxy enabled: %s", proxy_enabled)
     except Exception:
         pass
 
@@ -1495,10 +1538,9 @@ if __name__ == "__main__":
     port = int(os.environ.get("COINSCAPE_PORT", "9876"))
     host = os.environ.get("COINSCAPE_HOST", "0.0.0.0")
     
-    print(f"Starting CoinScape server at http://{host}:{port}")
-    print(f"Set COINSCAPE_SAVE_PATH env var to change data directory")
-    print(f"  Current SAVE_PATH: {db.SAVE_PATH}")
-    print()
+    logger.info("Starting CoinScape server at http://%s:%s", host, port)
+    logger.info("Set COINSCAPE_SAVE_PATH env var to change data directory")
+    logger.info("  Current SAVE_PATH: %s", db.SAVE_PATH)
     # Check if port is already in use to avoid confusing bind errors.
     try:
         check_host = host
@@ -1511,7 +1553,6 @@ if __name__ == "__main__":
                 msg = f"Port {port} appears to be already in use on {check_host}.\n" \
                       f"Please stop the other process using this port or set COINSCAPE_PORT to a different port."
                 logger.error(msg)
-                print(msg)
                 sys.exit(1)
     except Exception as e:
         # If the check itself fails, log but attempt to continue — uvicorn will surface binding errors if any.
@@ -1521,7 +1562,6 @@ if __name__ == "__main__":
         uvicorn.run(app, host=host, port=port)
     except OSError as e:
         logger.error('Failed to start server on %s:%s - %s', host, port, e, exc_info=True)
-        print(f"Failed to bind to {host}:{port}: {e}")
         sys.exit(1)
     except Exception:
         logger.exception('Unexpected error while running server')

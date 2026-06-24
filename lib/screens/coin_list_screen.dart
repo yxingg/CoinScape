@@ -1131,7 +1131,7 @@ Future<void> _pullFromCloud() async {
     final repo = ref.read(coinRepositoryProvider);
 
     // Normalize keys: backend may send snake_case, Drift expects camelCase.
-    // Date values may be: ISO strings, integer ms-since-epoch, or Dart extended format (+YYYYY-...).
+    // Date values may be: ISO strings, integer seconds/ms-since-epoch, or Dart extended format.
     Map<String, dynamic> normalizeKeys(Map<String, dynamic> json) {
       final out = <String, dynamic>{};
       json.forEach((key, value) {
@@ -1139,8 +1139,14 @@ Future<void> _pullFromCloud() async {
           RegExp(r'_([a-z])'),
           (m) => m.group(1)!.toUpperCase(),
         ) : key;
-        if (value is int && value > 946684800000) {
-          try { out[camel] = DateTime.fromMillisecondsSinceEpoch(value); } catch (_) { out[camel] = value; }
+        if (value is int) {
+          if (value > 1e12) {
+            try { out[camel] = DateTime.fromMillisecondsSinceEpoch(value); } catch (_) { out[camel] = value; }
+          } else if (value > 1e9) {
+            try { out[camel] = DateTime.fromMillisecondsSinceEpoch(value * 1000); } catch (_) { out[camel] = value; }
+          } else {
+            out[camel] = value;
+          }
         } else if (value is String) {
           if (RegExp(r'^\d{4}-\d{2}-\d{2}').hasMatch(value)) {
             try { out[camel] = DateTime.parse(value); } catch (_) { out[camel] = value; }

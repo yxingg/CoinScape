@@ -524,6 +524,8 @@ class FileSyncManager:
             coinImages = rows("SELECT id, coin_id, image_path, sort_order FROM coin_images")
             seriesImages = rows("SELECT id, series_id, image_path, sort_order FROM series_images")
             conn.close()
+            logger.info('_extract_data_from_sqlite_file %s: series=%d, coins=%d, links=%d, coinImages=%d, seriesImages=%d',
+                        os.path.basename(path), len(series), len(coins), len(links), len(coinImages), len(seriesImages))
             return {
                 'series': series,
                 'coins': coins,
@@ -583,9 +585,10 @@ class FileSyncManager:
         auth = (user, pw) if user or pw else None
         remote_root = webdav.get('remote_path') or ''
 
-        # fetch remote marker timestamp if available
+        # Download marker file to local temp, read timestamp after all imports
         meta_rel = '.coinscape/last_cloud_backup.txt'
         remote_ts = None
+        marker_local_path = os.path.join(self.save_path, '.last_cloud_backup.json')
         try:
             meta_url = self._build_remote_url(url, remote_root, meta_rel)
             client = self._create_async_client(20.0)
@@ -593,22 +596,14 @@ class FileSyncManager:
                 try:
                     resp = await self._request_with_retry(client, 'GET', meta_url, auth=auth, timeout=20.0, max_attempts=2)
                     if resp is not None and resp.status_code in (200, 201):
-                        try:
-                            j = resp.json()
-                            if isinstance(j, dict) and 'timestamp' in j:
-                                remote_ts = j.get('timestamp')
-                            else:
-                                text = (resp.text or '').strip()
-                                if text:
-                                    remote_ts = text
-                        except Exception:
-                            text = (resp.text or '').strip()
-                            if text:
-                                remote_ts = text
+                        # Save marker to local temp file
+                        os.makedirs(os.path.dirname(marker_local_path), exist_ok=True)
+                        with open(marker_local_path, 'w', encoding='utf-8') as f:
+                            f.write(resp.text or '')
                 except Exception:
                     pass
         except Exception:
-            remote_ts = None
+            pass
 
         downloaded = 0
         failed = 0
@@ -759,14 +754,8 @@ class FileSyncManager:
             except Exception as e:
                 logger.warning('Fallback .ccm scan failed: %s', e)
 
-        # After pull, sync local timestamp with remote so status shows "已同步"
-        # Use remote marker time if available, otherwise use current time
-        sync_ts = remote_ts or datetime.utcnow().isoformat()
-        try:
-            await asyncio.to_thread(db.update_app_settings, {'sync': {'last_local_change': sync_ts}})
-        except Exception:
-            pass
-
+        # Do NOT set last_local_change here — merge hasn't happened yet.
+        # The frontend will call /api/sync/apply_marker after merge.
         return {'downloaded': downloaded, 'failed': failed, 'imported_db': imported_db, 'remote_marker': remote_ts}
 
     async def preview_pull(self) -> Dict[str, Any]:
@@ -821,17 +810,18 @@ class FileSyncManager:
 
         local_map: Dict[str, Dict[str, Any]] = {r['path']: dict(r) for r in rows}
 
-        all_paths = sorted(set(list(remote_map.keys()) + list(local_map.keys())))
+        # Only show files that exist on the remote. Skip local-only entries.
+        all_paths = sorted(remote_map.keys())
         entries: List[Dict[str, Any]] = []
         counts = {'new_remote': 0, 'modified_remote': 0, 'deleted_remote': 0, 'local_only': 0, 'unchanged': 0}
 
         for path in all_paths:
-            r = remote_map.get(path)
+            r = remote_map[path]
             l = local_map.get(path)
-            if r and not l:
+            if not l:
                 status = 'new_remote'
                 counts['new_remote'] += 1
-            elif r and l:
+            else:
                 # compare using etag when available, otherwise size
                 if r.get('etag') and l.get('remote_etag') and str(r.get('etag')) != str(l.get('remote_etag')):
                     status = 'modified_remote'
@@ -842,14 +832,6 @@ class FileSyncManager:
                 else:
                     status = 'unchanged'
                     counts['unchanged'] += 1
-            else:
-                # not remote but present locally
-                if l and l.get('last_synced_at'):
-                    status = 'deleted_remote'
-                    counts['deleted_remote'] += 1
-                else:
-                    status = 'local_only'
-                    counts['local_only'] += 1
 
             entries.append({'path': path, 'status': status, 'remote': r, 'local': l})
 

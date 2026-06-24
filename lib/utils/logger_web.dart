@@ -1,36 +1,27 @@
+import 'dart:developer' as developer;
 import 'dart:html' as html;
-import 'package:flutter/foundation.dart';
 
 Future<String?> initLogWriter() async {
-  // Web平台使用localStorage存储日志
-  // 返回虚拟路径用于标识
   return 'web://localStorage/logs/coinscape.log';
 }
 
 Future<void> appendLog(String line) async {
   try {
-    // 尝试使用localStorage存储日志
     final storage = html.window.localStorage;
     const key = 'coinscape_logs';
 
-    // 获取现有的日志
     String existingLogs = storage[key] ?? '';
-
-    // 添加新日志行
     final updatedLogs = '$existingLogs$line\n';
 
-    // 限制日志大小（最多保留最近1000行）
     final lines = updatedLogs.split('\n');
     if (lines.length > 1000) {
-      // 只保留最近1000行
       final recentLines = lines.sublist(lines.length - 1000);
       storage[key] = recentLines.join('\n');
     } else {
       storage[key] = updatedLogs;
     }
   } catch (e) {
-    // 如果localStorage失败，至少打印到控制台
-    debugPrint('Web日志存储失败: $e\n原始日志: $line');
+    developer.log('Web日志存储失败: $e\n原始日志: $line', level: 1000, name: 'LOGGER');
   }
 }
 
@@ -51,7 +42,7 @@ class LogConfig {
       final storage = html.window.localStorage;
       storage.remove('coinscape_logs');
     } catch (e) {
-      debugPrint('清空Web日志失败: $e');
+      developer.log('清空Web日志失败: $e', level: 1000, name: 'LOGGER');
     }
   }
 

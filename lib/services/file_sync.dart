@@ -231,7 +231,7 @@ class FileSyncManager {
       basicAuth = 'Basic ${base64Encode(utf8.encode('$user:$password'))}';
     }
 
-    AppLogger.info(logPrefixSync, 'processQueue: url=$url user=$user remoteRoot=$remoteRoot');
+    AppLogger.debug(logPrefixSync, 'processQueue: url=$url user=${user.isNotEmpty ? "[已设置]" : "[未设置]"} remoteRoot=$remoteRoot');
     final client = http.Client();
     var processed = 0, succeeded = 0, failed = 0;
 
@@ -609,7 +609,7 @@ class FileSyncManager {
         }
 
         AppLogger.info(logPrefixSync, 'PROPFIND found ${remoteFiles.length} remote files');
-        for (final rf in remoteFiles) { AppLogger.info(logPrefixSync, '  remote: ${rf["path"]}'); }
+        for (final rf in remoteFiles) { AppLogger.debug(logPrefixSync, '  remote: ${rf["path"]}'); }
         // compare with local index
         final newRemote = <Map<String, dynamic>>[];
         final modifiedRemote = <Map<String, dynamic>>[];

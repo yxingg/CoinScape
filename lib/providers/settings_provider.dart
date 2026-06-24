@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../services/api_service.dart';
+import '../utils/logger.dart';
 
 class AppSettings {
   final String displayFontId;
@@ -260,6 +261,7 @@ class SettingsNotifier extends StateNotifier<AppSettings> {
     } catch (_) {
       _loadFromPrefs();
     }
+    _applyLogLevel();
   }
 
   Future<void> _loadFromPrefs() async {
@@ -282,6 +284,17 @@ class SettingsNotifier extends StateNotifier<AppSettings> {
     );
     try {
       ApiService.setBaseUrl(state.backendUrl);
+    } catch (_) {}
+    _applyLogLevel();
+  }
+
+  void _applyLogLevel() {
+    try {
+      final level = LogLevel.values.firstWhere(
+        (e) => e.name == state.logLevel,
+        orElse: () => LogLevel.info,
+      );
+      AppLogger.setLogLevel(level);
     } catch (_) {}
   }
 
